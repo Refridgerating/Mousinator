@@ -1,0 +1,35 @@
+# Computer vision datasets
+data/
+
+# Training / inference outputs
+runs/
+
+# Model weights
+*.pt
+*.pth
+*.onnx
+*.engine
+*.ckpt
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Firmware build artifacts
+build/
+*.elf
+*.map
+*.o
+*.d
+
+# Compiled test binaries
+tests/board_mapping_test
+tests/motion_test
+tests/protocol_test
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
