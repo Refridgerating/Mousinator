@@ -16,8 +16,13 @@ typedef struct {
 	bool motion_timeout;
 } pan_controller_snapshot_t;
 
+typedef enum {
+	PAN_ENABLE_OK = 0,
+	PAN_ENABLE_DRIVER_NOT_READY
+} pan_enable_result_t;
+
 void pan_controller_init(void);
-void pan_controller_enable(void);
+pan_enable_result_t pan_controller_enable(void);
 pan_disable_result_t pan_controller_disable(void);
 pan_velocity_result_t pan_controller_set_velocity(int32_t velocity_steps_s);
 void pan_controller_stop(void);

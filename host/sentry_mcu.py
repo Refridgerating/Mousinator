@@ -26,6 +26,18 @@ STATE_PATTERN = re.compile(
     r"VEL=(?P<velocity>-?\d+) TARGET=(?P<target>-?\d+) "
     r"TIMEOUT=(?P<timeout>[01])$"
 )
+DRIVER_PATTERN = re.compile(
+    r"^OK DRIVER (?P<axis>PAN|TILT) ADDR=(?P<address>\d+) "
+    r"PRESENT=(?P<present>[01]) CONFIGURED=(?P<configured>[01]) "
+    r"ERR=(?P<error>[A-Z_]+) IFCNT=(?P<ifcnt>\d+) "
+    r"IOIN=(?P<ioin>0x[0-9A-F]{8}) GSTAT=(?P<gstat>0x[0-9A-F]{8}) "
+    r"DRV=(?P<drv>0x[0-9A-F]{8}) RUN_MA=(?P<run_ma>\d+) "
+    r"HOLD_MA=(?P<hold_ma>\d+) MSTEP=(?P<microsteps>\d+) "
+    r"INTPOL=(?P<interpolate>[01]) "
+    r"MODE=(?P<mode>STEALTHCHOP|UNCONFIGURED) OTPW=(?P<otpw>[01]) "
+    r"STST=(?P<standstill>[01]) STEALTH=(?P<stealth_active>[01]) "
+    r"FATAL=(?P<fatal>[01])$"
+)
 
 
 @dataclass(frozen=True)
@@ -37,6 +49,28 @@ class PanState:
     velocity_steps_s: int
     target_velocity_steps_s: int
     motion_timeout: bool
+
+
+@dataclass(frozen=True)
+class DriverStatus:
+    axis: str
+    address: int
+    present: bool
+    configured: bool
+    error: str
+    interface_count: int
+    ioin: int
+    gstat: int
+    drv_status: int
+    run_current_ma: int
+    hold_current_ma: int
+    microsteps: int
+    interpolate: bool
+    mode: str
+    overtemperature_warning: bool
+    standstill: bool
+    stealthchop_active: bool
+    fatal: bool
 
 
 def discover_device() -> str:
@@ -107,6 +141,39 @@ class SentryMcu:
             motion_timeout=fields["timeout"] == "1",
         )
 
+    def driver(self, axis: str) -> DriverStatus:
+        normalized_axis = axis.upper()
+        if normalized_axis not in ("PAN", "TILT"):
+            raise ValueError("driver axis must be pan or tilt")
+        response = self.expect_ok(f"DRIVER? {normalized_axis}")
+        match = DRIVER_PATTERN.fullmatch(response)
+        if match is None:
+            raise RuntimeError(f"unexpected DRIVER? response: {response}")
+        fields = match.groupdict()
+        return DriverStatus(
+            axis=fields["axis"],
+            address=int(fields["address"]),
+            present=fields["present"] == "1",
+            configured=fields["configured"] == "1",
+            error=fields["error"],
+            interface_count=int(fields["ifcnt"]),
+            ioin=int(fields["ioin"], 16),
+            gstat=int(fields["gstat"], 16),
+            drv_status=int(fields["drv"], 16),
+            run_current_ma=int(fields["run_ma"]),
+            hold_current_ma=int(fields["hold_ma"]),
+            microsteps=int(fields["microsteps"]),
+            interpolate=fields["interpolate"] == "1",
+            mode=fields["mode"],
+            overtemperature_warning=fields["otpw"] == "1",
+            standstill=fields["standstill"] == "1",
+            stealthchop_active=fields["stealth_active"] == "1",
+            fatal=fields["fatal"] == "1",
+        )
+
+    def configure_drivers(self) -> str:
+        return self.expect_ok("DRIVER CONFIGURE")
+
 
 def wait_for_stop(controller: SentryMcu, timeout_s: float = 2.0) -> PanState:
     deadline = time.monotonic() + timeout_s
@@ -145,6 +212,8 @@ def run_motor_test(
 
     print(controller.expect_ok("PING"))
     print(controller.expect_ok("INFO"))
+    print(controller.configure_drivers())
+    print(controller.driver("pan"))
     print(controller.expect_ok("ENABLE PAN"))
     try:
         run_segment(controller, velocity, duration_s, refresh_s)
@@ -163,8 +232,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", help="CDC device; otherwise discover 1209:0001")
     subparsers = parser.add_subparsers(dest="action", required=True)
 
-    for action in ("ping", "info", "state", "enable", "stop", "disable"):
+    for action in (
+        "ping",
+        "info",
+        "state",
+        "enable",
+        "stop",
+        "disable",
+        "configure-drivers",
+    ):
         subparsers.add_parser(action)
+
+    driver_parser = subparsers.add_parser("driver")
+    driver_parser.add_argument("axis", choices=("pan", "tilt"))
 
     velocity_parser = subparsers.add_parser("velocity")
     velocity_parser.add_argument("steps_per_second", type=int)
@@ -190,6 +270,10 @@ def main() -> int:
                 )
             elif args.action == "state":
                 print(controller.state())
+            elif args.action == "driver":
+                print(controller.driver(args.axis))
+            elif args.action == "configure-drivers":
+                print(controller.configure_drivers())
             else:
                 commands = {
                     "ping": "PING",

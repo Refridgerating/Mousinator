@@ -27,6 +27,8 @@ build/
 tests/board_mapping_test
 tests/motion_test
 tests/protocol_test
+tests/tmc2209_test
+tests/*.exe
 
 # Editors / OS
 .vscode/

@@ -21,6 +21,10 @@
 #define PAN_DIRECTION_PIN BOARD_PAN_DIRECTION_PIN_MASK
 #define PAN_ENABLE_PIN BOARD_PAN_ENABLE_PIN_MASK
 
+#define SENTRY_AFIO_REMAPS \
+	(AFIO_MAPR_TIM2_REMAP_PARTIAL_REMAP2 | \
+	 AFIO_MAPR_USART3_REMAP_PARTIAL_REMAP)
+
 void board_safe_init(void)
 {
 	/* The bootloader occupies the first 28 KiB of flash. */
@@ -99,7 +103,22 @@ void board_pan_step_use_timer(void)
 	 * Repeat the established SWJ setting because those bits are write-only.
 	 */
 	gpio_primary_remap(AFIO_MAPR_SWJ_CFG_JTAG_OFF_SW_OFF,
-			   AFIO_MAPR_TIM2_REMAP_PARTIAL_REMAP2);
+			   SENTRY_AFIO_REMAPS);
 	gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_2_MHZ,
 		      GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, PAN_STEP_PIN);
+}
+
+void board_tmc_uart_use_usart(void)
+{
+	/*
+	 * USART3 partial remap routes TX/RX to PC10/PC11. Full remap would use
+	 * PD8/PD9 and is not valid for the STM32F103RC package used here.
+	 * The SKR combines TX and RX into the TMC single-wire bus through
+	 * R72/R73 (100 ohm) and R74 (1 kohm), so transmitted bytes reach RX.
+	 */
+	gpio_primary_remap(AFIO_MAPR_SWJ_CFG_JTAG_OFF_SW_OFF,
+			   SENTRY_AFIO_REMAPS);
+	gpio_set_mode(GPIOC, GPIO_MODE_OUTPUT_2_MHZ,
+		      GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, GPIO10);
+	gpio_set_mode(GPIOC, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, GPIO11);
 }

@@ -1,4 +1,5 @@
 #include "protocol.h"
+#include "driver_control.h"
 #include "pan_controller.h"
 
 #include <stdbool.h>
@@ -18,6 +19,11 @@ static pan_controller_snapshot_t mock_snapshot;
 static pan_disable_result_t mock_disable_result;
 static pan_velocity_result_t mock_velocity_result;
 static int32_t mock_last_velocity;
+static pan_enable_result_t mock_enable_result;
+static tmc2209_device_t mock_pan_driver;
+static tmc2209_device_t mock_tilt_driver;
+static bool mock_pan_configure_success;
+static bool mock_tilt_configure_success;
 
 static void mock_reset(void)
 {
@@ -31,15 +37,31 @@ static void mock_reset(void)
 	mock_disable_result = PAN_DISABLE_COMPLETE;
 	mock_velocity_result = PAN_VELOCITY_OK;
 	mock_last_velocity = 0;
+	mock_enable_result = PAN_ENABLE_OK;
+	mock_pan_configure_success = true;
+	mock_tilt_configure_success = true;
+	tmc2209_device_init(&mock_pan_driver, 2U,
+			 &(tmc2209_transport_t){NULL, NULL, NULL});
+	tmc2209_device_init(&mock_tilt_driver, 1U,
+			 &(tmc2209_transport_t){NULL, NULL, NULL});
+	mock_pan_driver.state = TMC2209_STATE_PRESENT;
+	mock_pan_driver.ioin = (uint32_t)TMC2209_EXPECTED_VERSION <<
+			       TMC2209_IOIN_VERSION_SHIFT;
+	mock_tilt_driver.state = TMC2209_STATE_PRESENT;
+	mock_tilt_driver.ioin = (uint32_t)TMC2209_EXPECTED_VERSION <<
+				TMC2209_IOIN_VERSION_SHIFT;
 }
 
 void pan_controller_init(void)
 {
 }
 
-void pan_controller_enable(void)
+pan_enable_result_t pan_controller_enable(void)
 {
-	mock_snapshot.enabled = true;
+	if (mock_enable_result == PAN_ENABLE_OK) {
+		mock_snapshot.enabled = true;
+	}
+	return mock_enable_result;
 }
 
 pan_disable_result_t pan_controller_disable(void)
@@ -61,6 +83,42 @@ void pan_controller_stop(void)
 void pan_controller_get_snapshot(pan_controller_snapshot_t *snapshot)
 {
 	*snapshot = mock_snapshot;
+}
+
+void driver_control_init(void)
+{
+}
+
+driver_configure_result_t driver_control_configure(void)
+{
+	driver_configure_result_t result = {mock_pan_configure_success,
+					    mock_tilt_configure_success};
+
+	mock_pan_driver.state = mock_pan_configure_success ?
+		TMC2209_STATE_CONFIGURED : TMC2209_STATE_ERROR;
+	mock_pan_driver.run_current_ma = TMC2209_RUN_CURRENT_MA;
+	mock_pan_driver.hold_current_ma = TMC2209_HOLD_CURRENT_MA;
+	mock_pan_driver.microsteps = TMC2209_MICROSTEPS;
+	mock_pan_driver.interpolate = true;
+	mock_pan_driver.stealthchop = true;
+	mock_tilt_driver.state = mock_tilt_configure_success ?
+		TMC2209_STATE_CONFIGURED : TMC2209_STATE_ERROR;
+	return result;
+}
+
+void driver_control_refresh(driver_axis_t axis)
+{
+	(void)axis;
+}
+
+const tmc2209_device_t *driver_control_get(driver_axis_t axis)
+{
+	return axis == DRIVER_AXIS_PAN ? &mock_pan_driver : &mock_tilt_driver;
+}
+
+bool driver_control_pan_ready(void)
+{
+	return mock_pan_driver.state == TMC2209_STATE_CONFIGURED;
 }
 
 static bool capture_write(const uint8_t *data, size_t length, void *context)
@@ -228,6 +286,77 @@ static int check_pending_disable(void)
 	return 0;
 }
 
+static int check_driver_commands(void)
+{
+	static const uint8_t commands[] =
+		"DRIVER? PAN\nDRIVER CONFIGURE\nDRIVER? TILT\n";
+	static const char expected[] =
+		"OK DRIVER PAN ADDR=2 PRESENT=1 CONFIGURED=0 ERR=NONE IFCNT=0 "
+		"IOIN=0x21000000 GSTAT=0x00000000 DRV=0x00000000 RUN_MA=0 "
+		"HOLD_MA=0 MSTEP=0 INTPOL=0 MODE=UNCONFIGURED OTPW=0 STST=0 "
+		"STEALTH=0 FATAL=0\r\n"
+		"OK DRIVERS PAN=CONFIGURED TILT=CONFIGURED\r\n"
+		"OK DRIVER TILT ADDR=1 PRESENT=1 CONFIGURED=1 ERR=NONE IFCNT=0 "
+		"IOIN=0x21000000 GSTAT=0x00000000 DRV=0x00000000 RUN_MA=0 "
+		"HOLD_MA=0 MSTEP=0 INTPOL=0 MODE=UNCONFIGURED OTPW=0 STST=0 "
+		"STEALTH=0 FATAL=0\r\n";
+
+	return check_case("driver commands", commands, sizeof(commands) - 1U,
+			  expected, sizeof(expected) - 1U);
+}
+
+static int check_driver_enable_gate(void)
+{
+	static const uint8_t command[] = "ENABLE PAN\n";
+	static const char expected[] = "ERR PAN_DRIVER_NOT_READY\r\n";
+	protocol_t protocol;
+	capture_t capture = {{0U}, 0U};
+
+	mock_reset();
+	mock_enable_result = PAN_ENABLE_DRIVER_NOT_READY;
+	protocol_init(&protocol, capture_write, &capture);
+	protocol_receive(&protocol, command, sizeof(command) - 1U);
+	if (!bytes_equal(capture.bytes, capture.length, expected,
+			 sizeof(expected) - 1U)) {
+		(void)fprintf(stderr, "FAIL: driver enable gate\n");
+		return 1;
+	}
+	return 0;
+}
+
+static int check_driver_configure_guards(void)
+{
+	static const uint8_t command[] = "DRIVER CONFIGURE\n";
+	static const char enabled_expected[] = "ERR PAN_ENABLED\r\n";
+	static const char partial_expected[] =
+		"ERR DRIVER_CONFIG PAN=CONFIGURED TILT=ERROR\r\n";
+	protocol_t protocol;
+	capture_t capture = {{0U}, 0U};
+	int failures = 0;
+
+	mock_reset();
+	mock_snapshot.enabled = true;
+	protocol_init(&protocol, capture_write, &capture);
+	protocol_receive(&protocol, command, sizeof(command) - 1U);
+	if (!bytes_equal(capture.bytes, capture.length, enabled_expected,
+			 sizeof(enabled_expected) - 1U)) {
+		(void)fprintf(stderr, "FAIL: configure while PAN enabled\n");
+		++failures;
+	}
+
+	mock_reset();
+	mock_tilt_configure_success = false;
+	capture.length = 0U;
+	protocol_init(&protocol, capture_write, &capture);
+	protocol_receive(&protocol, command, sizeof(command) - 1U);
+	if (!bytes_equal(capture.bytes, capture.length, partial_expected,
+			 sizeof(partial_expected) - 1U)) {
+		(void)fprintf(stderr, "FAIL: partial driver configuration\n");
+		++failures;
+	}
+	return failures;
+}
+
 static int check_state_extremes(void)
 {
 	static const uint8_t command[] = "STATE?\n";
@@ -286,7 +415,7 @@ int main(void)
 	static const uint8_t line_endings[] = "PING\rINFO\nPING\r\n";
 	static const char line_endings_expected[] =
 		"OK PONG\r\n"
-		"OK SENTRY-MCU 0.2.1 SKR_MINI_E3_V2\r\n"
+		"OK SENTRY-MCU 0.3.0 SKR_MINI_E3_V2\r\n"
 		"OK PONG\r\n";
 	static const uint8_t whitespace[] = " \tPING\t \n";
 	static const char pong[] = "OK PONG\r\n";
@@ -321,6 +450,9 @@ int main(void)
 	failures += check_velocity_state_errors();
 	failures += check_pending_disable();
 	failures += check_state_extremes();
+	failures += check_driver_commands();
+	failures += check_driver_enable_gate();
+	failures += check_driver_configure_guards();
 
 	if (failures == 0) {
 		(void)puts("protocol tests passed");

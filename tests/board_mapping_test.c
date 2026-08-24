@@ -35,6 +35,19 @@ int main(void)
 			  "future TILT is Z-driver PB0/PC5/PB1");
 	failures += check(BOARD_ZAM_ZBM_PARALLEL_OUTPUTS == 1U,
 			  "ZAM and ZBM are one parallel driver output");
+	failures += check(BOARD_TILT_ENABLE_ACTIVE_LOW == 1U,
+			  "TILT enable remains active-low PB1");
+	failures += check(BOARD_TMC_UART_TX_GPIO_PORT == BOARD_GPIO_PORT_C &&
+			  BOARD_TMC_UART_TX_PIN_NUMBER == 10U &&
+			  BOARD_TMC_UART_RX_GPIO_PORT == BOARD_GPIO_PORT_C &&
+			  BOARD_TMC_UART_RX_PIN_NUMBER == 11U,
+			  "TMC UART is USART3 partial-remap PC10/PC11");
+	failures += check(BOARD_TMC_USART_NUMBER == 3U &&
+			  BOARD_TMC_USART3_PARTIAL_REMAP == 1U,
+			  "TMC UART uses USART3 partial remap");
+	failures += check(BOARD_PAN_TMC_ADDRESS == 2U &&
+			  BOARD_TILT_TMC_ADDRESS == 1U,
+			  "PAN/TILT TMC addresses are 2/1");
 
 	if (failures == 0) {
 		(void)puts("board mapping tests passed");

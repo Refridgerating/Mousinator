@@ -420,7 +420,7 @@ Example:
 
 ```text
 > INFO
-< OK SENTRY-MCU 0.2.1 SKR_MINI_E3_V2
+< OK SENTRY-MCU 0.3.0 SKR_MINI_E3_V2
 ```
 
 Later commands may include:
@@ -916,8 +916,9 @@ Current implementation decision:
   and a 1000 ms velocity-command lease.
 - Reversal passes through zero before PB2 changes. A moving disable is
   asynchronous and completes only after controlled deceleration.
-- M0 and M1 are hardware-validated. M2 is build-verified but must remain
-  hardware-unvalidated until the physical motor acceptance test passes.
+- M0, M1, and M2 are hardware-validated. M2 passed smooth bidirectional
+  800 steps/s motion, exact 800-to-0 position return, controlled acceleration,
+  STOP/enable/disable, responsive USB, and the 1000 ms physical deadman test.
 
 Use PAN through the Y driver and YM connector first.
 
@@ -940,19 +941,27 @@ Acceptance:
 
 ## M3: TMC2209
 
-Implement:
+Current implementation decision:
 
-- UART communication
-- register reads
-- current configuration
-- microsteps
-- driver status
-
-Acceptance:
-
-- firmware confirms communication with PAN driver
-- driver configuration can be read back
-- current can be set predictably
+- USART3 runs at 115200 baud, 8N1, polling only in main context, with partial
+  remap to PC10/PC11. AFIO writes preserve TIM2 partial-remap 2 and disabled
+  SWJ bits.
+- PAN/Y uses TMC address 2 and TILT/Z uses address 1. The shared board bus can
+  echo TX through R72/R73/R74, so only an exact request echo is discarded.
+- Each attempt is bounded to 5 ms, retries at most three times, and observes
+  at least 12 idle bit times between attempts. Replies require sync, master
+  address 0xFF, expected register and valid CRC.
+- Boot is probe-only: both addresses receive communication verification with
+  NODECONF SENDDELAY=2 and an unchanged GCONF write checked through IFCNT.
+- `DRIVER CONFIGURE`, while PAN is fully disabled, applies the fixed digital
+  520 mA run / 275 mA hold, 16-microstep interpolated StealthChop2 settings to
+  each driver independently. Configuration is volatile and idempotent; no OTP
+  or MCU flash is written.
+- PAN cannot enable until its driver is configured and nonfatal. TILT motion
+  remains unavailable and PB1 remains inactive high.
+- M3 is implemented and build-verified but hardware-unvalidated until the
+  documented M3-A and M3-B procedures pass. Do not begin M4 before explicit
+  authorization after those results.
 
 ## M4: Two-Axis Motion
 
@@ -1122,12 +1131,7 @@ It should not be treated as a 3D printer motherboard at the software architectur
 
 # Immediate Task
 
-M0 and M1 have been physically validated. Unless explicitly instructed
-otherwise, Codex should work toward physical validation and correction of:
-
-```text
-Milestone M2
-```
-
-Do not begin TMC2209 UART configuration, TILT motion, homing, or M3 work until
-M2 has been physically tested and further work is explicitly requested.
+M0, M1, and M2 have physically passed. M3 is implemented/build-verified and
+awaits M3-A/M3-B physical validation and correction. Do not begin TILT motion,
+homing, M4, or later milestones until M3 has been physically tested and
+further work is explicitly requested.

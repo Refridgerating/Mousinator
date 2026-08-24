@@ -1,5 +1,6 @@
 #include "pan_controller.h"
 
+#include "driver_control.h"
 #include "stepper.h"
 
 #include <libopencm3/cm3/nvic.h>
@@ -47,15 +48,22 @@ void pan_controller_init(void)
 	timer_enable_counter(CONTROL_TIMER);
 }
 
-void pan_controller_enable(void)
+pan_enable_result_t pan_controller_enable(void)
 {
 	control_irq_disable();
+	/* Recheck the authoritative CONFIGURED/fatal state at the PB11 boundary. */
+	if (!driver_control_pan_ready()) {
+		stepper_pan_set_enabled(false);
+		control_irq_enable();
+		return PAN_ENABLE_DRIVER_NOT_READY;
+	}
 	if (!pan_state.enabled) {
 		pan_motion_enable(&pan_state);
 		stepper_pan_set_direction(true);
 		stepper_pan_set_enabled(true);
 	}
 	control_irq_enable();
+	return PAN_ENABLE_OK;
 }
 
 pan_disable_result_t pan_controller_disable(void)

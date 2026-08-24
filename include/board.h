@@ -29,7 +29,18 @@
 #define BOARD_TILT_ENABLE_GPIO_PORT BOARD_GPIO_PORT_B
 #define BOARD_TILT_ENABLE_PIN_NUMBER 1U
 #define BOARD_TILT_ENABLE_PIN_MASK (1U << BOARD_TILT_ENABLE_PIN_NUMBER)
+#define BOARD_TILT_ENABLE_ACTIVE_LOW 1U
 #define BOARD_ZAM_ZBM_PARALLEL_OUTPUTS 1U
+
+/* Shared TMC2209 UART uses USART3 partial remap on PC10/PC11. */
+#define BOARD_TMC_UART_TX_GPIO_PORT BOARD_GPIO_PORT_C
+#define BOARD_TMC_UART_TX_PIN_NUMBER 10U
+#define BOARD_TMC_UART_RX_GPIO_PORT BOARD_GPIO_PORT_C
+#define BOARD_TMC_UART_RX_PIN_NUMBER 11U
+#define BOARD_TMC_USART_NUMBER 3U
+#define BOARD_TMC_USART3_PARTIAL_REMAP 1U
+#define BOARD_PAN_TMC_ADDRESS 2U
+#define BOARD_TILT_TMC_ADDRESS 1U
 
 /*
  * Configure every safety-critical output while the MCU is still running from
@@ -47,5 +58,8 @@ void board_usb_connect(bool connected);
 void board_pan_set_enabled(bool enabled);
 void board_pan_set_direction(bool positive);
 void board_pan_step_use_timer(void);
+
+/* Configure USART3 partial remap without disturbing the PAN timer remap. */
+void board_tmc_uart_use_usart(void);
 
 #endif

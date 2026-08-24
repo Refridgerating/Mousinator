@@ -13,6 +13,7 @@ CC := $(PREFIX)-gcc
 OBJCOPY := $(PREFIX)-objcopy
 SIZE := $(PREFIX)-size
 HOST_CC ?= cc
+PYTHON ?= python
 
 SOURCES := $(wildcard $(SRC_DIR)/*.c)
 OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SOURCES))
@@ -36,6 +37,7 @@ check-tools:
 	@command -v $(CC) >/dev/null 2>&1 || { echo "error: $(CC) not found in PATH"; exit 1; }
 	@command -v $(OBJCOPY) >/dev/null 2>&1 || { echo "error: $(OBJCOPY) not found in PATH"; exit 1; }
 	@command -v git >/dev/null 2>&1 || { echo "error: git not found in PATH"; exit 1; }
+	@command -v $(PYTHON) >/dev/null 2>&1 || { echo "error: $(PYTHON) not found in PATH"; exit 1; }
 
 deps: verify-libopencm3 $(LIBOPENCM3_LIBRARY)
 
@@ -51,6 +53,8 @@ verify-libopencm3: $(LIBOPENCM3_DIR)/.git
 	fi
 
 $(LIBOPENCM3_LIBRARY): verify-libopencm3
+	cd $(LIBOPENCM3_DIR) && $(PYTHON) scripts/irq2nvic_h \
+		./include/libopencm3/stm32/f1/irq.json
 	$(MAKE) -C $(LIBOPENCM3_DIR) TARGETS=stm32/f1
 
 $(BUILD_DIR):
@@ -58,6 +62,10 @@ $(BUILD_DIR):
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $< -o $@
+
+# libopencm3 generates target headers (including STM32F1 NVIC definitions),
+# so a pristine build must finish the pinned dependency before compiling us.
+$(OBJECTS): | $(LIBOPENCM3_LIBRARY)
 
 $(BUILD_DIR)/$(PROJECT).elf: $(OBJECTS) $(LIBOPENCM3_LIBRARY) $(LINKER_SCRIPT)
 	$(CC) $(OBJECTS) $(LDFLAGS) $(LDLIBS) -o $@
@@ -69,15 +77,18 @@ $(BUILD_DIR)/$(PROJECT).bin: $(BUILD_DIR)/$(PROJECT).elf
 firmware.bin: $(BUILD_DIR)/$(PROJECT).elf
 	$(OBJCOPY) -O binary $< $@
 
-test: tests/protocol_test tests/motion_test tests/board_mapping_test
+test: tests/protocol_test tests/motion_test tests/board_mapping_test \
+		tests/tmc2209_test
 	./tests/protocol_test
 	./tests/motion_test
 	./tests/board_mapping_test
+	./tests/tmc2209_test
 
-tests/protocol_test: tests/protocol_test.c src/protocol.c include/protocol.h \
-		include/pan_controller.h include/motion.h
+tests/protocol_test: tests/protocol_test.c src/protocol.c src/tmc2209.c \
+		include/protocol.h include/pan_controller.h include/motion.h \
+		include/driver_control.h include/tmc2209.h
 	$(HOST_CC) -std=c11 -O2 -Iinclude -Wall -Wextra -Wshadow -Wconversion \
-		-Wundef -Werror tests/protocol_test.c src/protocol.c -o $@
+		-Wundef -Werror tests/protocol_test.c src/protocol.c src/tmc2209.c -o $@
 
 tests/motion_test: tests/motion_test.c src/motion.c include/motion.h
 	$(HOST_CC) -std=c11 -O2 -Iinclude -Wall -Wextra -Wshadow -Wconversion \
@@ -87,9 +98,14 @@ tests/board_mapping_test: tests/board_mapping_test.c include/board.h
 	$(HOST_CC) -std=c11 -O2 -Iinclude -Wall -Wextra -Wshadow -Wconversion \
 		-Wundef -Werror tests/board_mapping_test.c -o $@
 
+tests/tmc2209_test: tests/tmc2209_test.c src/tmc2209.c include/tmc2209.h
+	$(HOST_CC) -std=c11 -O2 -Iinclude -Wall -Wextra -Wshadow -Wconversion \
+		-Wundef -Werror tests/tmc2209_test.c src/tmc2209.c -o $@
+
 clean:
 	rm -rf $(BUILD_DIR) firmware.bin tests/protocol_test tests/protocol_test.exe \
 		tests/motion_test tests/motion_test.exe tests/board_mapping_test \
-		tests/board_mapping_test.exe
+		tests/board_mapping_test.exe tests/tmc2209_test \
+		tests/tmc2209_test.exe
 
 -include $(DEPENDENCIES)

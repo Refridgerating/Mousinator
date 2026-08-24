@@ -1,5 +1,6 @@
 #include "protocol.h"
 
+#include "driver_control.h"
 #include "pan_controller.h"
 
 #include <limits.h>
@@ -23,7 +24,7 @@ typedef struct {
 static const uint8_t RESPONSE_OK[] = "OK\r\n";
 static const uint8_t RESPONSE_PONG[] = "OK PONG\r\n";
 static const uint8_t RESPONSE_INFO[] =
-	"OK SENTRY-MCU 0.2.1 SKR_MINI_E3_V2\r\n";
+	"OK SENTRY-MCU 0.3.0 SKR_MINI_E3_V2\r\n";
 static const uint8_t RESPONSE_PAN_ENABLED[] = "OK PAN ENABLED\r\n";
 static const uint8_t RESPONSE_PAN_DISABLED[] = "OK PAN DISABLED\r\n";
 static const uint8_t RESPONSE_PAN_DISABLING[] = "OK PAN DISABLING\r\n";
@@ -34,6 +35,9 @@ static const uint8_t RESPONSE_BAD_ARGUMENT[] = "ERR BAD_ARGUMENT\r\n";
 static const uint8_t RESPONSE_VELOCITY_RANGE[] = "ERR VELOCITY_RANGE\r\n";
 static const uint8_t RESPONSE_PAN_DISABLED_ERROR[] = "ERR PAN_DISABLED\r\n";
 static const uint8_t RESPONSE_PAN_DISABLING_ERROR[] = "ERR PAN_DISABLING\r\n";
+static const uint8_t RESPONSE_PAN_DRIVER_NOT_READY[] =
+	"ERR PAN_DRIVER_NOT_READY\r\n";
+static const uint8_t RESPONSE_PAN_ENABLED_ERROR[] = "ERR PAN_ENABLED\r\n";
 
 STATIC_ASSERT(info_response_fits,
 	      (ARRAY_LENGTH(RESPONSE_INFO) - 1U) <= PROTOCOL_MAX_RESPONSE_SIZE);
@@ -185,6 +189,19 @@ static void response_append_i64(response_builder_t *builder, int64_t value)
 	response_append_u64(builder, magnitude);
 }
 
+static void response_append_hex32(response_builder_t *builder, uint32_t value)
+{
+	static const char HEX_DIGITS[] = "0123456789ABCDEF";
+	uint8_t shift = 32U;
+
+	response_append_text(builder, "0x");
+	while (shift > 0U) {
+		shift = (uint8_t)(shift - 4U);
+		response_append_byte(
+			builder, (uint8_t)HEX_DIGITS[(value >> shift) & 0x0FU]);
+	}
+}
+
 static void protocol_emit(protocol_t *protocol, const uint8_t *response,
 			  size_t response_length)
 {
@@ -219,6 +236,117 @@ static void protocol_emit_state(protocol_t *protocol)
 							       (uint8_t)'0');
 	response_append_text(&response, "\r\n");
 
+	if (!response.overflow) {
+		protocol_emit(protocol, response.bytes, response.length);
+	}
+}
+
+static void protocol_emit_driver(protocol_t *protocol, driver_axis_t axis)
+{
+	const tmc2209_device_t *device;
+	pan_controller_snapshot_t pan_snapshot;
+	response_builder_t response = {{0U}, 0U, false};
+	const bool is_pan = axis == DRIVER_AXIS_PAN;
+	bool present;
+
+	driver_control_refresh(axis);
+	device = driver_control_get(axis);
+	if (is_pan) {
+		if (device->fatal) {
+			pan_controller_get_snapshot(&pan_snapshot);
+			if (pan_snapshot.enabled) {
+				pan_controller_stop();
+				(void)pan_controller_disable();
+			}
+		}
+	}
+	present = ((uint8_t)(device->ioin >> TMC2209_IOIN_VERSION_SHIFT) ==
+		   TMC2209_EXPECTED_VERSION);
+
+	response_append_text(&response, "OK DRIVER ");
+	response_append_text(&response, is_pan ? "PAN" : "TILT");
+	response_append_text(&response, " ADDR=");
+	response_append_u64(&response, device->address);
+	response_append_text(&response, " PRESENT=");
+	response_append_byte(&response, present ? (uint8_t)'1' : (uint8_t)'0');
+	response_append_text(&response, " CONFIGURED=");
+	response_append_byte(
+		&response, device->state == TMC2209_STATE_CONFIGURED ?
+			   (uint8_t)'1' :
+			   (uint8_t)'0');
+	response_append_text(&response, " ERR=");
+	response_append_text(&response, tmc2209_error_name(device->error));
+	response_append_text(&response, " IFCNT=");
+	response_append_u64(&response, device->ifcnt);
+	response_append_text(&response, " IOIN=");
+	response_append_hex32(&response, device->ioin);
+	response_append_text(&response, " GSTAT=");
+	response_append_hex32(&response, device->gstat);
+	response_append_text(&response, " DRV=");
+	response_append_hex32(&response, device->drv_status);
+	response_append_text(&response, " RUN_MA=");
+	response_append_u64(&response, device->run_current_ma);
+	response_append_text(&response, " HOLD_MA=");
+	response_append_u64(&response, device->hold_current_ma);
+	response_append_text(&response, " MSTEP=");
+	response_append_u64(&response, device->microsteps);
+	response_append_text(&response, " INTPOL=");
+	response_append_byte(&response,
+			     device->interpolate ? (uint8_t)'1' : (uint8_t)'0');
+	response_append_text(&response, " MODE=");
+	response_append_text(&response,
+			     device->stealthchop ? "STEALTHCHOP" : "UNCONFIGURED");
+	response_append_text(&response, " OTPW=");
+	response_append_byte(
+		&response, (device->drv_status & TMC2209_DRV_STATUS_OTPW) != 0U ?
+			   (uint8_t)'1' :
+			   (uint8_t)'0');
+	response_append_text(&response, " STST=");
+	response_append_byte(
+		&response, (device->drv_status & TMC2209_DRV_STATUS_STST) != 0U ?
+			   (uint8_t)'1' :
+			   (uint8_t)'0');
+	response_append_text(&response, " STEALTH=");
+	response_append_byte(
+		&response, (device->drv_status & TMC2209_DRV_STATUS_STEALTH) != 0U ?
+			   (uint8_t)'1' :
+			   (uint8_t)'0');
+	response_append_text(&response, " FATAL=");
+	response_append_byte(&response, device->fatal ? (uint8_t)'1' :
+						       (uint8_t)'0');
+	response_append_text(&response, "\r\n");
+
+	if (!response.overflow) {
+		protocol_emit(protocol, response.bytes, response.length);
+	}
+}
+
+static void protocol_handle_driver_configure(protocol_t *protocol)
+{
+	pan_controller_snapshot_t snapshot;
+	driver_configure_result_t result;
+	const tmc2209_device_t *pan;
+	const tmc2209_device_t *tilt;
+	response_builder_t response = {{0U}, 0U, false};
+
+	pan_controller_get_snapshot(&snapshot);
+	if (snapshot.enabled || snapshot.moving || snapshot.disabling) {
+		protocol_emit(protocol, RESPONSE_PAN_ENABLED_ERROR,
+			      ARRAY_LENGTH(RESPONSE_PAN_ENABLED_ERROR) - 1U);
+		return;
+	}
+	result = driver_control_configure();
+	pan = driver_control_get(DRIVER_AXIS_PAN);
+	tilt = driver_control_get(DRIVER_AXIS_TILT);
+
+	response_append_text(&response, result.pan_configured &&
+						 result.tilt_configured ?
+					     "OK DRIVERS PAN=" :
+					     "ERR DRIVER_CONFIG PAN=");
+	response_append_text(&response, tmc2209_state_name(pan->state));
+	response_append_text(&response, " TILT=");
+	response_append_text(&response, tmc2209_state_name(tilt->state));
+	response_append_text(&response, "\r\n");
 	if (!response.overflow) {
 		protocol_emit(protocol, response.bytes, response.length);
 	}
@@ -297,9 +425,16 @@ static void protocol_dispatch(protocol_t *protocol, const char *command,
 	} else if (token_equals(tokens[0], "ENABLE", 6U)) {
 		if ((token_count == 2U) &&
 		    token_equals(tokens[1], "PAN", 3U)) {
-			pan_controller_enable();
-			protocol_emit(protocol, RESPONSE_PAN_ENABLED,
-				      ARRAY_LENGTH(RESPONSE_PAN_ENABLED) - 1U);
+			if (pan_controller_enable() == PAN_ENABLE_OK) {
+				protocol_emit(
+					protocol, RESPONSE_PAN_ENABLED,
+					ARRAY_LENGTH(RESPONSE_PAN_ENABLED) - 1U);
+			} else {
+				protocol_emit(
+					protocol, RESPONSE_PAN_DRIVER_NOT_READY,
+					ARRAY_LENGTH(RESPONSE_PAN_DRIVER_NOT_READY) -
+						1U);
+			}
 		} else {
 			protocol_emit(protocol, RESPONSE_BAD_ARGUMENT,
 				      ARRAY_LENGTH(RESPONSE_BAD_ARGUMENT) - 1U);
@@ -330,6 +465,25 @@ static void protocol_dispatch(protocol_t *protocol, const char *command,
 	} else if (token_equals(tokens[0], "STATE?", 6U)) {
 		if (token_count == 1U) {
 			protocol_emit_state(protocol);
+		} else {
+			protocol_emit(protocol, RESPONSE_BAD_ARGUMENT,
+				      ARRAY_LENGTH(RESPONSE_BAD_ARGUMENT) - 1U);
+		}
+	} else if (token_equals(tokens[0], "DRIVER?", 7U)) {
+		if ((token_count == 2U) &&
+		    token_equals(tokens[1], "PAN", 3U)) {
+			protocol_emit_driver(protocol, DRIVER_AXIS_PAN);
+		} else if ((token_count == 2U) &&
+			   token_equals(tokens[1], "TILT", 4U)) {
+			protocol_emit_driver(protocol, DRIVER_AXIS_TILT);
+		} else {
+			protocol_emit(protocol, RESPONSE_BAD_ARGUMENT,
+				      ARRAY_LENGTH(RESPONSE_BAD_ARGUMENT) - 1U);
+		}
+	} else if (token_equals(tokens[0], "DRIVER", 6U)) {
+		if ((token_count == 2U) &&
+		    token_equals(tokens[1], "CONFIGURE", 9U)) {
+			protocol_handle_driver_configure(protocol);
 		} else {
 			protocol_emit(protocol, RESPONSE_BAD_ARGUMENT,
 				      ARRAY_LENGTH(RESPONSE_BAD_ARGUMENT) - 1U);

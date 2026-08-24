@@ -19,17 +19,16 @@ The README should be updated as firmware capabilities are added and hardware beh
 Current development focus:
 
 ```text
-M2: Single-axis PAN motion
+M3: TMC2209 UART hardware validation
 ```
 
-The M0/M1 implementation is build-verified and has been reported as physically
-validated by the hardware operator on the SKR Mini E3 V2.0. M0 and M1 are
-therefore complete. This status records operator validation without implying
-that later motion-control milestones have been tested.
+- M0 hardware validation: **PASS**
+- M1 hardware validation: **PASS**
+- M2 hardware validation: **PASS**
 
-M2 is implemented and build-verified, but remains hardware-unvalidated. It
-must not be marked complete until the physical acceptance checks pass on the
-SKR Mini E3 V2.0 with a connected PAN motor.
+M3 is implemented and build-verified. Its USART3 electrical behavior and TMC
+configuration remain hardware-unvalidated until the M3-A and M3-B procedures
+below pass on the SKR Mini E3 V2.0.
 
 Implemented behavior:
 
@@ -41,6 +40,8 @@ Implemented behavior:
 - bounded text protocol supporting `PING`, `INFO`, and M2 PAN commands
 - TIM3-driven integer acceleration and motion-command deadman
 - TIM2_CH3 hardware one-shot STEP pulses on PB10
+- polling USART3 TMC2209 diagnostics and fixed, host-triggered configuration
+- PAN enable gating on a configured, nonfatal driver state
 - fixed-size static buffers with no dynamic allocation
 
 Initial target:
@@ -248,7 +249,7 @@ Firmware information:
 
 ```text
 > INFO
-< OK SENTRY-MCU 0.2.1 SKR_MINI_E3_V2
+< OK SENTRY-MCU 0.3.0 SKR_MINI_E3_V2
 ```
 
 Commands are ASCII, case-sensitive, and terminated by CR, LF, or CRLF.
@@ -319,6 +320,43 @@ ERR PAN_DISABLED
 ERR PAN_DISABLING
 ```
 
+M3 adds:
+
+```text
+DRIVER? PAN
+DRIVER? TILT
+DRIVER CONFIGURE
+```
+
+Boot probes both TMC2209 addresses and verifies the non-behavior-changing
+write path, but intentionally does not configure current, microsteps, or the
+chopper. `DRIVER CONFIGURE` applies the fixed M3 configuration independently
+to PAN and TILT and is allowed only while PAN is fully disabled. Configuration
+lasts for the current power cycle; it writes neither OTP nor MCU flash.
+
+`ENABLE PAN` returns `ERR PAN_DRIVER_NOT_READY` until PAN is configured and
+has no detected fatal status. Driver queries never configure or move a motor.
+A successful configuration returns:
+
+```text
+OK DRIVERS PAN=CONFIGURED TILT=CONFIGURED
+```
+
+A partial or total failure returns each retained driver state:
+
+```text
+ERR DRIVER_CONFIG PAN=<state> TILT=<state>
+```
+
+Driver status is a bounded machine-readable line containing address, presence,
+configuration state, last error, raw IOIN/GSTAT/DRV_STATUS, commanded current
+and microstep settings, decoded overtemperature warning, standstill,
+StealthChop activity, and fatal state. For example:
+
+```text
+OK DRIVER PAN ADDR=2 PRESENT=1 CONFIGURED=1 ERR=NONE IFCNT=7 IOIN=0x21000000 GSTAT=0x00000000 DRV=0xC0100000 RUN_MA=520 HOLD_MA=275 MSTEP=16 INTPOL=1 MODE=STEALTHCHOP OTPW=0 STST=1 STEALTH=1 FATAL=0
+```
+
 The protocol may evolve as requirements become clearer.
 
 A binary protocol is not currently required.
@@ -369,6 +407,8 @@ Requirements:
 
 - GNU Make
 - Git
+- Python 3 (the pinned libopencm3 generator is invoked explicitly so builds
+  also work from CRLF checkouts)
 - Arm GNU Toolchain (`arm-none-eabi-gcc`, `arm-none-eabi-objcopy`, and
   `arm-none-eabi-size` on `PATH`)
 
@@ -441,7 +481,7 @@ OK PONG
 Repeat with `printf 'INFO\r\n' > "$DEVICE"` and expect:
 
 ```text
-OK SENTRY-MCU 0.2.1 SKR_MINI_E3_V2
+OK SENTRY-MCU 0.3.0 SKR_MINI_E3_V2
 ```
 
 These commands are the physical validation procedure used for M1. Hardware
@@ -521,7 +561,8 @@ tests negative motion, stops again, disables PAN, and prints final state. Stop
 the test and disconnect power immediately if motion or any unused output is
 unexpected.
 
-M2 remains hardware-unvalidated until all of the following are confirmed:
+The following M2 acceptance checks passed on physical hardware using firmware
+0.2.1 with PAN connected to YM/Y:
 
 1. The board still boots safely.
 2. USB still enumerates reliably.
@@ -540,6 +581,94 @@ M2 remains hardware-unvalidated until all of the following are confirmed:
 14. USB remains responsive during motion.
 15. X, Z, E, heater, and fan outputs remain inactive.
 16. Repeated power cycles still boot safely.
+
+The operator additionally recorded smooth positive and negative motion during
+repeated 800 steps/s, 1.0 s tests. The first direction ended at `POS=800` and
+the reverse returned exactly to `POS=0`. Acceleration and controlled
+deceleration were visibly smooth; STOP, ENABLE, DISABLE, and USB responsiveness
+all passed. The 1000 ms deadman was tested with one `VEL PAN 300` followed by
+host silence and reported `POS=299 VEL=0 TARGET=0 TIMEOUT=1`. No unintended
+motion was observed on other outputs.
+
+## M3 TMC2209 Architecture
+
+The shared TMC bus uses STM32 USART3 at 115200 baud, 8 data bits, no parity,
+and one stop bit. USART3 AFIO partial remap (`01`) routes TX to PC10 and RX to
+PC11; full remap is not applicable because it routes to PD8/PD9. Every AFIO
+write also preserves TIM2 partial-remap 2 and the established disabled-SWJ
+setting, leaving M2 PAN STEP/DIR generation unchanged.
+
+The SKR schematic combines TX and RX through R72/R73 (100 ohm) and R74
+(1 kohm), so the polling transport expects transmitted bytes to appear on RX.
+It captures at most one exact request echo plus one reply, discards only an
+exact echo, validates the reply, bounds each transaction attempt to 5 ms, and
+retries at most three times. Recovery waits 200 us—more than 12 bit times at
+115200 baud—using the Cortex-M3 cycle counter. All TMC I/O runs during boot or
+a USB command in main context; TIM2/TIM3 interrupt handlers never call it.
+
+Datagrams follow TMC2209 Rev. 1.09 directly: sync `0x05`, four-byte reads,
+eight-byte writes/replies, data most-significant byte first, master reply
+address `0xFF`, and CRC-8/ATM polynomial `0x07`, initial zero, with each input
+byte processed least-significant bit first. PAN/Y is address 2 and TILT/Z is
+address 1. IOIN must report version `0x21`. `NODECONF.SENDDELAY=2` supports the
+shared multi-node bus. Writes are accepted only after IFCNT advances by one
+modulo 256; readable configuration registers also receive masked readback.
+
+The verified [BTT V2.0 schematic](https://github.com/bigtreetech/BIGTREETECH-SKR-mini-E3/blob/master/hardware/BTT%20SKR%20MINI%20E3%20V2.0/Hardware/BTT%20SKR%20MINI%20E3%20V2.0SCHpdf.PDF)
+labels each external phase sense resistor `0R11`, or 0.11 ohm. M3 selects
+digital current scaling and external sense
+resistors (`I_scale_analog=0`, `internal_Rsense=0`) with `VSENSE=1`. Using the
+datasheet relationship with the 20 milliohm internal contribution gives
+IRUN=16 as 520 mA RMS and IHOLD=8 as 275 mA RMS (52.9% of run current).
+`IHOLDDELAY=8` and `TPOWERDOWN=20`. The calculator rejects requests over the
+firmware's 580 mA safety ceiling, and no arbitrary-current host command exists.
+
+The fixed configuration selects register-controlled 16 microsteps (`MRES=4`)
+and interpolation to 256. One firmware position step remains one emitted STEP
+rising edge. StealthChop2 remains selected at every speed (`TPWMTHRS=0`) with
+automatic scaling and gradient, PWM frequency 1, offset 36, gradient 14,
+regulator 8, and limit 12. CHOPCONF uses TOFF 5, TBL 2, HSTRT 4, HEND 0,
+single-edge stepping, and enabled short protections. VACTUAL is never written.
+IHOLD_IRUN is write-only on the TMC2209, so its commanded current is verified
+through IFCNT rather than literal readback; readable registers use masked
+readback and DRV_STATUS retains the live `CS_ACTUAL` bits in its raw value.
+
+TILT is probed and configured to prove independent addressability, but it has
+no STEP generation or enable command. PB1 remains inactive high, and ZAM/ZBM
+remain parallel outputs from one disabled Z driver.
+
+## M3 Physical Validation
+
+M3-A is communication-only. Motors may remain disconnected, but normal SKR
+main power must be present:
+
+```bash
+python3 host/sentry_mcu.py --device /dev/serial/by-id/<sentry-device> ping
+python3 host/sentry_mcu.py --device /dev/serial/by-id/<sentry-device> info
+python3 host/sentry_mcu.py --device /dev/serial/by-id/<sentry-device> driver pan
+python3 host/sentry_mcu.py --device /dev/serial/by-id/<sentry-device> driver tilt
+```
+
+Confirm PAN only at address 2, TILT only at address 1, CRC-valid reads and
+IFCNT write verification, both enables inactive, and no activity on unused
+outputs.
+
+M3-B explicitly configures both drivers for this power cycle and repeats the
+proven PAN motion test:
+
+```bash
+python3 host/sentry_mcu.py --device /dev/serial/by-id/<sentry-device> configure-drivers
+python3 host/sentry_mcu.py --device /dev/serial/by-id/<sentry-device> driver pan
+python3 host/sentry_mcu.py --device /dev/serial/by-id/<sentry-device> driver tilt
+python3 host/sentry_mcu.py --device /dev/serial/by-id/<sentry-device> motor-test --velocity 300 --duration 1.0
+python3 host/sentry_mcu.py --device /dev/serial/by-id/<sentry-device> motor-test --velocity 800 --duration 1.0
+```
+
+Confirm healthy status, smooth forward/reverse motion, return to zero, no
+unexpected noise or heating, STOP/deadman/USB behavior, and no unused output
+activity. Because configuration is deliberately not persistent, repeat
+`DRIVER CONFIGURE` after every reset. M3 remains hardware-unvalidated until
+both stages and repeated-power-cycle initialization pass.
 
 Future USB-based firmware updates may be investigated later.
 
@@ -664,7 +793,7 @@ over USB from the Raspberry Pi.
 
 ## M2: Single-Axis Motion
 
-Status: implemented and build-verified; physical validation pending.
+Status: hardware-validated and complete (PASS).
 
 Goals:
 
@@ -684,6 +813,8 @@ Pan motor can be commanded safely in both directions.
 ---
 
 ## M3: TMC2209 Control
+
+Status: implemented and build-verified; M3-A/M3-B physical validation pending.
 
 Goals:
 
