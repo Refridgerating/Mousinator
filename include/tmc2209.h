@@ -125,6 +125,7 @@ typedef enum {
 	TMC2209_ERROR_READBACK,
 	TMC2209_ERROR_VERSION,
 	TMC2209_ERROR_RANGE,
+	TMC2209_ERROR_RESET,
 	TMC2209_ERROR_FATAL_STATUS
 } tmc2209_error_t;
 
@@ -144,6 +145,7 @@ typedef struct {
 	uint8_t address;
 	tmc2209_state_t state;
 	tmc2209_error_t error;
+	bool configuration_valid;
 	uint32_t ioin;
 	uint32_t gstat;
 	uint32_t drv_status;

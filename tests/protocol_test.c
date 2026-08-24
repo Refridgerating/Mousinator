@@ -96,6 +96,7 @@ driver_configure_result_t driver_control_configure(void)
 
 	mock_pan_driver.state = mock_pan_configure_success ?
 		TMC2209_STATE_CONFIGURED : TMC2209_STATE_ERROR;
+	mock_pan_driver.configuration_valid = mock_pan_configure_success;
 	mock_pan_driver.run_current_ma = TMC2209_RUN_CURRENT_MA;
 	mock_pan_driver.hold_current_ma = TMC2209_HOLD_CURRENT_MA;
 	mock_pan_driver.microsteps = TMC2209_MICROSTEPS;
@@ -103,6 +104,7 @@ driver_configure_result_t driver_control_configure(void)
 	mock_pan_driver.stealthchop = true;
 	mock_tilt_driver.state = mock_tilt_configure_success ?
 		TMC2209_STATE_CONFIGURED : TMC2209_STATE_ERROR;
+	mock_tilt_driver.configuration_valid = mock_tilt_configure_success;
 	return result;
 }
 
@@ -118,7 +120,10 @@ const tmc2209_device_t *driver_control_get(driver_axis_t axis)
 
 bool driver_control_pan_ready(void)
 {
-	return mock_pan_driver.state == TMC2209_STATE_CONFIGURED;
+	return (mock_pan_driver.state == TMC2209_STATE_CONFIGURED) &&
+	       mock_pan_driver.configuration_valid &&
+	       (mock_pan_driver.error == TMC2209_ERROR_NONE) &&
+	       !mock_pan_driver.fatal;
 }
 
 static bool capture_write(const uint8_t *data, size_t length, void *context)

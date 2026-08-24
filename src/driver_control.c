@@ -27,6 +27,11 @@ void driver_control_init(void)
 
 static bool configure_driver(tmc2209_device_t *device)
 {
+	if ((device->state == TMC2209_STATE_CONFIGURED) &&
+	    device->configuration_valid &&
+	    (device->error == TMC2209_ERROR_NONE) && !device->fatal) {
+		return true;
+	}
 	if ((device->state != TMC2209_STATE_PRESENT) &&
 	    (device->state != TMC2209_STATE_CONFIGURED)) {
 		if (tmc2209_probe(device) != TMC2209_ERROR_NONE) {
@@ -61,5 +66,6 @@ const tmc2209_device_t *driver_control_get(driver_axis_t axis)
 bool driver_control_pan_ready(void)
 {
 	return (pan_driver.state == TMC2209_STATE_CONFIGURED) &&
-	       !pan_driver.fatal;
+	       pan_driver.configuration_valid &&
+	       (pan_driver.error == TMC2209_ERROR_NONE) && !pan_driver.fatal;
 }

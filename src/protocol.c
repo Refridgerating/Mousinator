@@ -252,7 +252,7 @@ static void protocol_emit_driver(protocol_t *protocol, driver_axis_t axis)
 	driver_control_refresh(axis);
 	device = driver_control_get(axis);
 	if (is_pan) {
-		if (device->fatal) {
+		if (device->fatal || (device->error == TMC2209_ERROR_RESET)) {
 			pan_controller_get_snapshot(&pan_snapshot);
 			if (pan_snapshot.enabled) {
 				pan_controller_stop();
@@ -271,7 +271,9 @@ static void protocol_emit_driver(protocol_t *protocol, driver_axis_t axis)
 	response_append_byte(&response, present ? (uint8_t)'1' : (uint8_t)'0');
 	response_append_text(&response, " CONFIGURED=");
 	response_append_byte(
-		&response, device->state == TMC2209_STATE_CONFIGURED ?
+		&response, (device->state == TMC2209_STATE_CONFIGURED) &&
+				   device->configuration_valid &&
+				   (device->error == TMC2209_ERROR_NONE) ?
 			   (uint8_t)'1' :
 			   (uint8_t)'0');
 	response_append_text(&response, " ERR=");

@@ -175,6 +175,40 @@ class SentryMcu:
         return self.expect_ok("DRIVER CONFIGURE")
 
 
+def driver_is_ready(status: DriverStatus) -> bool:
+    return (
+        status.present
+        and status.configured
+        and status.error == "NONE"
+        and not status.fatal
+    )
+
+
+def prepare_pan_motor_test(controller: SentryMcu, output=print) -> DriverStatus:
+    pan = controller.driver("pan")
+    output(pan)
+    configuration_response: str | None = None
+
+    if not driver_is_ready(pan):
+        configuration_response = controller.command("DRIVER CONFIGURE")
+        output(configuration_response)
+        # A partial configuration error is not authoritative for PAN. Query
+        # PAN again and let the firmware's enable gate remain the final check.
+        pan = controller.driver("pan")
+        output(pan)
+        if not driver_is_ready(pan):
+            raise RuntimeError("PAN driver is not configured and fault-free")
+
+    tilt = controller.driver("tilt")
+    output(tilt)
+    if not driver_is_ready(tilt) or (
+        configuration_response is not None
+        and configuration_response.startswith("ERR DRIVER_CONFIG")
+    ):
+        output("WARNING: TILT driver unavailable; proceeding with PAN-only test")
+    return pan
+
+
 def wait_for_stop(controller: SentryMcu, timeout_s: float = 2.0) -> PanState:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -212,8 +246,7 @@ def run_motor_test(
 
     print(controller.expect_ok("PING"))
     print(controller.expect_ok("INFO"))
-    print(controller.configure_drivers())
-    print(controller.driver("pan"))
+    prepare_pan_motor_test(controller)
     print(controller.expect_ok("ENABLE PAN"))
     try:
         run_segment(controller, velocity, duration_s, refresh_s)

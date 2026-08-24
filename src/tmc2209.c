@@ -243,6 +243,7 @@ void tmc2209_device_init(tmc2209_device_t *device, uint8_t address,
 	device->address = address;
 	device->state = TMC2209_STATE_UNKNOWN;
 	device->error = TMC2209_ERROR_NONE;
+	device->configuration_valid = false;
 	device->ioin = 0U;
 	device->gstat = 0U;
 	device->drv_status = 0U;
@@ -385,8 +386,19 @@ static tmc2209_error_t set_error(tmc2209_device_t *device,
 	return error;
 }
 
+static void invalidate_configuration(tmc2209_device_t *device)
+{
+	device->configuration_valid = false;
+	device->run_current_ma = 0U;
+	device->hold_current_ma = 0U;
+	device->microsteps = 0U;
+	device->interpolate = false;
+	device->stealthchop = false;
+}
+
 tmc2209_error_t tmc2209_probe(tmc2209_device_t *device)
 {
+	bool reset_invalidated_configuration = false;
 	uint32_t gconf;
 	uint32_t value;
 	tmc2209_error_t error;
@@ -438,11 +450,17 @@ tmc2209_error_t tmc2209_probe(tmc2209_device_t *device)
 	}
 	device->fatal = tmc2209_status_is_fatal(device->gstat,
 						device->drv_status);
+	if (device->configuration_valid &&
+	    ((device->gstat & TMC2209_GSTAT_RESET) != 0U)) {
+		invalidate_configuration(device);
+		reset_invalidated_configuration = true;
+	}
 	if (device->fatal) {
 		return set_error(device, TMC2209_ERROR_FATAL_STATUS);
 	}
 	device->state = TMC2209_STATE_PRESENT;
-	device->error = TMC2209_ERROR_NONE;
+	device->error = reset_invalidated_configuration ?
+		TMC2209_ERROR_RESET : TMC2209_ERROR_NONE;
 	return TMC2209_ERROR_NONE;
 }
 
@@ -477,10 +495,17 @@ tmc2209_error_t tmc2209_configure(tmc2209_device_t *device)
 	size_t index;
 	tmc2209_error_t error;
 
+	if ((device->state == TMC2209_STATE_CONFIGURED) &&
+	    device->configuration_valid &&
+	    (device->error == TMC2209_ERROR_NONE) && !device->fatal) {
+		return TMC2209_ERROR_NONE;
+	}
 	if ((device->state != TMC2209_STATE_PRESENT) &&
 	    (device->state != TMC2209_STATE_CONFIGURED)) {
 		return set_error(device, TMC2209_ERROR_UART);
 	}
+	/* A failed partial rewrite makes the previous applied metadata stale. */
+	invalidate_configuration(device);
 	if (!tmc2209_calculate_current(
 		    TMC2209_RUN_CURRENT_MA, TMC2209_MAX_CONFIGURED_CURRENT_MA,
 		    &calculated_run_scale, &calculated_run_current) ||
@@ -504,24 +529,37 @@ tmc2209_error_t tmc2209_configure(tmc2209_device_t *device)
 		}
 	}
 
-	error = tmc2209_refresh_status(device);
+	/*
+	 * GSTAT.reset is latched. Clear it after applying the configuration so
+	 * any later observation proves that the driver reset afterwards.
+	 */
+	error = write_verified(device, TMC2209_REGISTER_GSTAT,
+			       TMC2209_GSTAT_RESET, false, 0U);
 	if (error != TMC2209_ERROR_NONE) {
-		return error;
+		return set_error(device, error);
 	}
+
 	device->run_current_ma = calculated_run_current;
 	device->hold_current_ma = calculated_hold_current;
 	device->microsteps = TMC2209_MICROSTEPS;
 	device->interpolate = true;
 	device->stealthchop = true;
-	device->state = TMC2209_STATE_CONFIGURED;
-	device->error = TMC2209_ERROR_NONE;
+	device->configuration_valid = true;
+
+	error = tmc2209_refresh_status(device);
+	if (error != TMC2209_ERROR_NONE) {
+		return error;
+	}
+	if (!device->configuration_valid) {
+		return TMC2209_ERROR_RESET;
+	}
 	return TMC2209_ERROR_NONE;
 }
 
 tmc2209_error_t tmc2209_refresh_status(tmc2209_device_t *device)
 {
 	uint32_t value;
-	tmc2209_state_t previous_state = device->state;
+	bool reset_invalidated_configuration = false;
 	tmc2209_error_t error;
 
 	error = tmc2209_read_register(device, TMC2209_REGISTER_IOIN,
@@ -550,12 +588,18 @@ tmc2209_error_t tmc2209_refresh_status(tmc2209_device_t *device)
 	}
 	device->fatal = tmc2209_status_is_fatal(device->gstat,
 						device->drv_status);
+	if (device->configuration_valid &&
+	    ((device->gstat & TMC2209_GSTAT_RESET) != 0U)) {
+		invalidate_configuration(device);
+		reset_invalidated_configuration = true;
+	}
 	if (device->fatal) {
 		return set_error(device, TMC2209_ERROR_FATAL_STATUS);
 	}
-	device->state = previous_state == TMC2209_STATE_CONFIGURED ?
+	device->state = device->configuration_valid ?
 		TMC2209_STATE_CONFIGURED : TMC2209_STATE_PRESENT;
-	device->error = TMC2209_ERROR_NONE;
+	device->error = reset_invalidated_configuration ?
+		TMC2209_ERROR_RESET : TMC2209_ERROR_NONE;
 	return TMC2209_ERROR_NONE;
 }
 
@@ -603,6 +647,8 @@ const char *tmc2209_error_name(tmc2209_error_t error)
 		return "VERSION";
 	case TMC2209_ERROR_RANGE:
 		return "RANGE";
+	case TMC2209_ERROR_RESET:
+		return "RESET";
 	case TMC2209_ERROR_FATAL_STATUS:
 		return "FATAL";
 	}

@@ -107,7 +107,12 @@ static tmc2209_error_t register_exchange(
 			((uint32_t)transmit[4] << 16) |
 			((uint32_t)transmit[5] << 8) | (uint32_t)transmit[6];
 
-		fake->registers[register_address] = value;
+		if (register_address == TMC2209_REGISTER_GSTAT) {
+			/* GSTAT is read-and-write-one-to-clear. */
+			fake->registers[register_address] &= ~value;
+		} else {
+			fake->registers[register_address] = value;
+		}
 		fake->ifcnt = (uint8_t)(fake->ifcnt + 1U);
 		++fake->write_count;
 		*receive_length = transmit_length;
@@ -293,6 +298,7 @@ static int test_probe_configuration_and_readback(void)
 	int failures = 0;
 
 	fake.registers[TMC2209_REGISTER_IOIN] = 0x21000000UL;
+	fake.registers[TMC2209_REGISTER_GSTAT] = TMC2209_GSTAT_RESET;
 	tmc2209_device_init(&device, 2U, &transport);
 	failures += check(tmc2209_probe(&device) == TMC2209_ERROR_NONE &&
 			  device.state == TMC2209_STATE_PRESENT,
@@ -301,10 +307,23 @@ static int test_probe_configuration_and_readback(void)
 			  fake.registers[TMC2209_REGISTER_NODECONF] == 0x00000200UL,
 			  "probe verifies NODECONF and GCONF writes");
 	failures += check(tmc2209_configure(&device) == TMC2209_ERROR_NONE &&
-			  device.state == TMC2209_STATE_CONFIGURED,
+			  device.state == TMC2209_STATE_CONFIGURED &&
+			  device.configuration_valid,
 			  "configuration state transition");
-	failures += check(fake.ifcnt == 8U && fake.write_count == 8U,
+	failures += check(fake.ifcnt == 9U && fake.write_count == 9U,
 			  "all configuration writes verified by IFCNT");
+	failures += check(fake.registers[TMC2209_REGISTER_GSTAT] == 0U,
+			  "configuration establishes cleared reset baseline");
+	{
+		const uint8_t configured_ifcnt = fake.ifcnt;
+		const size_t configured_writes = fake.write_count;
+
+		failures += check(tmc2209_configure(&device) ==
+					  TMC2209_ERROR_NONE &&
+				  fake.ifcnt == configured_ifcnt &&
+				  fake.write_count == configured_writes,
+				  "configuration is idempotent when already ready");
+	}
 	failures += check(fake.registers[TMC2209_REGISTER_GCONF] == 0x000001C0UL,
 			  "fixed GCONF value");
 	failures += check(
@@ -365,6 +384,60 @@ static int test_probe_configuration_and_readback(void)
 	return failures;
 }
 
+static int test_configuration_validity_transitions(void)
+{
+	register_transport_t registers = {{0U}, 0U, 0U, 0U, 0U};
+	tmc2209_transport_t register_transport = {
+		register_exchange, NULL, &registers};
+	fake_transport_t timeout = {0U, UINT8_MAX, 0U, 0U, false};
+	tmc2209_transport_t timeout_transport = {
+		fake_exchange, fake_recover, &timeout};
+	tmc2209_device_t device;
+	int failures = 0;
+
+	registers.registers[TMC2209_REGISTER_IOIN] = 0x21000000UL;
+	tmc2209_device_init(&device, 2U, &register_transport);
+	failures += check(tmc2209_probe(&device) == TMC2209_ERROR_NONE &&
+			  tmc2209_configure(&device) == TMC2209_ERROR_NONE,
+			  "configured device prepared for state tests");
+
+	device.transport = timeout_transport;
+	failures += check(tmc2209_refresh_status(&device) ==
+				  TMC2209_ERROR_TIMEOUT &&
+			  device.state == TMC2209_STATE_ERROR &&
+			  device.configuration_valid &&
+			  device.run_current_ma == TMC2209_RUN_CURRENT_MA,
+			  "transient UART error blocks readiness but retains validity");
+	timeout.calls = 0U;
+	failures += check(tmc2209_probe(&device) == TMC2209_ERROR_TIMEOUT &&
+			  device.state == TMC2209_STATE_ERROR &&
+			  device.configuration_valid &&
+			  device.microsteps == TMC2209_MICROSTEPS,
+			  "failed recovery probe retains verified configuration");
+
+	device.transport = register_transport;
+	failures += check(tmc2209_refresh_status(&device) ==
+				  TMC2209_ERROR_NONE &&
+			  device.state == TMC2209_STATE_CONFIGURED &&
+			  device.error == TMC2209_ERROR_NONE &&
+			  device.configuration_valid,
+			  "successful refresh restores configured state");
+
+	registers.registers[TMC2209_REGISTER_GSTAT] = TMC2209_GSTAT_RESET;
+	failures += check(tmc2209_refresh_status(&device) ==
+				  TMC2209_ERROR_NONE &&
+			  device.state == TMC2209_STATE_PRESENT &&
+			  device.error == TMC2209_ERROR_RESET &&
+			  !device.configuration_valid && !device.fatal,
+			  "post-configuration reset invalidates configuration");
+	failures += check(device.run_current_ma == 0U &&
+			  device.hold_current_ma == 0U &&
+			  device.microsteps == 0U && !device.interpolate &&
+			  !device.stealthchop,
+			  "invalid configuration cannot retain applied metadata");
+	return failures;
+}
+
 int main(void)
 {
 	int failures = 0;
@@ -374,6 +447,7 @@ int main(void)
 	failures += test_retry_and_timeout();
 	failures += test_current_microsteps_and_status();
 	failures += test_probe_configuration_and_readback();
+	failures += test_configuration_validity_transitions();
 	if (failures == 0) {
 		(void)puts("tmc2209 tests passed");
 	}

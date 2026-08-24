@@ -333,6 +333,17 @@ write path, but intentionally does not configure current, microsteps, or the
 chopper. `DRIVER CONFIGURE` applies the fixed M3 configuration independently
 to PAN and TILT and is allowed only while PAN is fully disabled. Configuration
 lasts for the current power cycle; it writes neither OTP nor MCU flash.
+Drivers already verified as configured and nonfatal are left untouched, so a
+retry can recover one driver without rewriting the other or incrementing its
+IFCNT.
+
+Communication health and configuration validity are tracked separately. A
+transient UART error temporarily blocks enable, but a later successful status
+refresh restores `CONFIGURED` when the verified settings remain valid. The
+latched `GSTAT.reset` indication is cleared after configuration; if it is seen
+again, the cached configuration is invalidated, its commanded-setting metadata
+is cleared, and `DRIVER CONFIGURE` is required again. Reset is not classified
+as a fatal driver fault.
 
 `ENABLE PAN` returns `ERR PAN_DRIVER_NOT_READY` until PAN is configured and
 has no detected fatal status. Driver queries never configure or move a motor.
@@ -556,10 +567,14 @@ python3 host/sentry_mcu.py \
   motor-test --velocity 150 --duration 0.5
 ```
 
-The utility enables PAN, tests positive motion, stops and waits for zero,
-tests negative motion, stops again, disables PAN, and prints final state. Stop
-the test and disconnect power immediately if motion or any unused output is
-unexpected.
+The utility first queries PAN. It skips configuration when PAN is already
+authoritatively configured and fault-free; otherwise it attempts configuration
+and re-queries PAN before enable. A TILT-only configuration failure is reported
+as a warning and does not prevent the PAN test when PAN's refreshed status is
+ready. The firmware enable gate remains authoritative. The utility then enables
+PAN, tests positive motion, stops and waits for zero, tests negative motion,
+stops again, disables PAN, and prints final state. Stop the test and disconnect
+power immediately if motion or any unused output is unexpected.
 
 The following M2 acceptance checks passed on physical hardware using firmware
 0.2.1 with PAN connected to YM/Y:
