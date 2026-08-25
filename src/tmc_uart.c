@@ -29,6 +29,15 @@ static bool deadline_expired(uint32_t start_cycles, uint32_t timeout_us)
 	       (timeout_us * TMC_UART_CLOCKS_PER_US);
 }
 
+static void wait_for_bus_idle(uint32_t idle_us)
+{
+	const uint32_t start_cycles = DWT_CYCCNT;
+
+	/* TE remains enabled without DR writes, so USART3 TX stays idle-high. */
+	while (!deadline_expired(start_cycles, idle_us)) {
+	}
+}
+
 static uint8_t diagnostic_flags(uint32_t status)
 {
 	uint8_t flags = 0U;
@@ -186,18 +195,21 @@ static tmc2209_error_t tmc_uart_exchange(
 			return TMC2209_ERROR_TIMEOUT;
 		}
 	}
+	if (deadline_expired(
+		    start_cycles,
+		    TMC_UART_TRANSACTION_TIMEOUT_US - TMC_UART_POST_READ_IDLE_US)) {
+		return TMC2209_ERROR_TIMEOUT;
+	}
+	/* The TMC may drive the shared bus for four bit times after its reply. */
+	wait_for_bus_idle(TMC_UART_POST_READ_IDLE_US);
 	return TMC2209_ERROR_NONE;
 }
 
 static void tmc_uart_recover(void *context)
 {
-	const uint32_t start_cycles = DWT_CYCCNT;
-
 	(void)context;
 	clear_receive_state(true);
-	while (!deadline_expired(start_cycles, TMC_UART_RECOVERY_IDLE_US)) {
-		/* UART recovery requires at least 12 idle bit times. */
-	}
+	wait_for_bus_idle(TMC_UART_RECOVERY_IDLE_US);
 }
 
 static uint8_t tmc_uart_last_exchange_flags(void *context)

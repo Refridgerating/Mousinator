@@ -649,12 +649,15 @@ architecture decision.
 Each attempt remains bounded to 5 ms and each transaction receives at most
 three attempts. At 40000 baud, an 8N1 read occupies 1.0 ms for the four-byte
 request, 0.6 ms for unchanged `SENDDELAY=2` (24 bit times), and 2.0 ms for the
-eight-byte reply: 3.6 ms total, leaving 1.4 ms within the unchanged timeout. An
-eight-byte write occupies about 2.0 ms. Recovery remains unchanged at 200 us,
-which is 8 bit times at this experimental rate. Baud, SENDDELAY, retry count,
-transaction timeout, diagnostics, and all driver and motion safety behavior
-are otherwise unchanged. All TMC I/O runs during boot or a USB command in main
-context; TIM2/TIM3 interrupt handlers never call it.
+eight-byte reply. Firmware then keeps the master transmitter idle-high for the
+datasheet's four-bit TMC bus-release interval. One bit is 25 us at 40 kbaud, so
+the baud-derived guard is 100 us and the complete read is about 3.7 ms, leaving
+1.3 ms within the unchanged timeout. An eight-byte write occupies about 2.0
+ms. Error recovery now derives a twelve-bit idle-high interval from the same
+baud constant: 300 us at 40 kbaud. Baud, SENDDELAY, retry count, transaction
+timeout, diagnostics, and all driver and motion safety behavior are otherwise
+unchanged. All TMC I/O runs during boot or a USB command in main context;
+TIM2/TIM3 interrupt handlers never call it.
 
 Datagrams follow TMC2209 Rev. 1.09 directly: sync `0x05`, four-byte reads,
 eight-byte writes/replies, data most-significant byte first, master reply

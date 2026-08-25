@@ -101,7 +101,8 @@ tests/motion_test: tests/motion_test.c src/motion.c include/motion.h
 	$(HOST_CC) -std=c11 -O2 -Iinclude -Wall -Wextra -Wshadow -Wconversion \
 		-Wundef -Werror tests/motion_test.c src/motion.c -o $@
 
-tests/board_mapping_test: tests/board_mapping_test.c include/board.h
+tests/board_mapping_test: tests/board_mapping_test.c include/board.h \
+		include/tmc2209.h include/tmc_uart.h
 	$(HOST_CC) -std=c11 -O2 -Iinclude -Wall -Wextra -Wshadow -Wconversion \
 		-Wundef -Werror tests/board_mapping_test.c -o $@
 

@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#define REGISTER_HISTORY_CAPACITY 64U
+
 typedef struct {
 	uint32_t register_value;
 	uint8_t errors_before_success;
@@ -27,6 +29,9 @@ typedef struct {
 	uint8_t fail_matches_to_skip;
 	uint8_t fail_remaining;
 	tmc2209_error_t fail_error;
+	tmc2209_operation_t operation_history[REGISTER_HISTORY_CAPACITY];
+	uint8_t register_history[REGISTER_HISTORY_CAPACITY];
+	size_t history_count;
 } register_transport_t;
 
 static int check(bool condition, const char *name)
@@ -100,6 +105,12 @@ static tmc2209_error_t register_exchange(
 	const tmc2209_operation_t operation =
 		transmit_length == TMC2209_WRITE_DATAGRAM_SIZE ?
 			TMC2209_OPERATION_WRITE : TMC2209_OPERATION_READ;
+
+	if (fake->history_count < REGISTER_HISTORY_CAPACITY) {
+		fake->operation_history[fake->history_count] = operation;
+		fake->register_history[fake->history_count] = register_address;
+		++fake->history_count;
+	}
 
 	if ((fake->fail_remaining > 0U) &&
 	    (fake->fail_operation == operation) &&
@@ -630,6 +641,43 @@ static int test_probe_configuration_and_readback(void)
 	return failures;
 }
 
+static int test_register_transaction_sequences(void)
+{
+	register_transport_t fake = {0};
+	tmc2209_transport_t transport = {register_exchange, NULL, NULL, &fake};
+	tmc2209_device_t device;
+	uint32_t value;
+	int failures = 0;
+
+	fake.registers[TMC2209_REGISTER_IOIN] = 0x21000000UL;
+	tmc2209_device_init(&device, 2U, &transport);
+	failures += check(
+		tmc2209_read_register(&device, TMC2209_REGISTER_IOIN, &value) ==
+			TMC2209_ERROR_NONE &&
+		tmc2209_read_register(&device, TMC2209_REGISTER_GSTAT, &value) ==
+			TMC2209_ERROR_NONE &&
+		fake.history_count == 2U &&
+		fake.operation_history[0] == TMC2209_OPERATION_READ &&
+		fake.register_history[0] == TMC2209_REGISTER_IOIN &&
+		fake.operation_history[1] == TMC2209_OPERATION_READ &&
+		fake.register_history[1] == TMC2209_REGISTER_GSTAT,
+		"sequential register reads use reply-only transactions");
+
+	fake.history_count = 0U;
+	failures += check(
+		tmc2209_probe(&device) == TMC2209_ERROR_NONE &&
+		fake.history_count >= 3U &&
+		fake.operation_history[0] == TMC2209_OPERATION_READ &&
+		fake.register_history[0] == TMC2209_REGISTER_IFCNT &&
+		fake.operation_history[1] == TMC2209_OPERATION_WRITE &&
+		fake.register_history[1] == TMC2209_REGISTER_NODECONF &&
+		fake.operation_history[2] == TMC2209_OPERATION_READ &&
+		fake.register_history[2] == TMC2209_REGISTER_IFCNT &&
+		fake.ifcnt == 2U,
+		"NODECONF write is followed by authoritative IFCNT read");
+	return failures;
+}
+
 static int test_configuration_validity_transitions(void)
 {
 	register_transport_t registers = {0};
@@ -697,6 +745,7 @@ int main(void)
 	failures += test_diagnostic_names();
 	failures += test_failure_stage_paths();
 	failures += test_probe_configuration_and_readback();
+	failures += test_register_transaction_sequences();
 	failures += test_configuration_validity_transitions();
 	if (failures == 0) {
 		(void)puts("tmc2209 tests passed");
