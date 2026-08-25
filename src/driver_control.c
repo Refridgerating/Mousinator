@@ -63,11 +63,13 @@ const tmc2209_device_t *driver_control_get(driver_axis_t axis)
 	return axis == DRIVER_AXIS_PAN ? &pan_driver : &tilt_driver;
 }
 
-bool driver_control_pan_ready(void)
+bool driver_control_ready(driver_axis_t axis)
 {
-	return (pan_driver.state == TMC2209_STATE_CONFIGURED) &&
-	       pan_driver.configuration_valid &&
-	       (pan_driver.error == TMC2209_ERROR_NONE) && !pan_driver.fatal;
+	const tmc2209_device_t *device = driver_control_get(axis);
+
+	return (device->state == TMC2209_STATE_CONFIGURED) &&
+	       device->configuration_valid &&
+	       (device->error == TMC2209_ERROR_NONE) && !device->fatal;
 }
 
 void driver_control_get_uart_diagnostics(tmc_uart_diagnostics_t *diagnostics)

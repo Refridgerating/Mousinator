@@ -10,6 +10,11 @@
 #define PAN_STEP_TIMER_PERIOD 3U
 #define PAN_STEP_TIMER_RISE_TICK 2U
 
+#define TILT_STEP_TIMER TIM3
+#define TILT_STEP_TIMER_PRESCALER 71U
+#define TILT_STEP_TIMER_PERIOD 3U
+#define TILT_STEP_TIMER_RISE_TICK 2U
+
 void stepper_pan_init(void)
 {
 	board_pan_set_enabled(false);
@@ -56,4 +61,51 @@ void stepper_pan_emit_pulse(void)
 	timer_set_counter(PAN_STEP_TIMER, 0U);
 	timer_clear_flag(PAN_STEP_TIMER, TIM_SR_UIF);
 	timer_enable_counter(PAN_STEP_TIMER);
+}
+
+void stepper_tilt_init(void)
+{
+	board_tilt_set_enabled(false);
+	board_tilt_set_direction_raw(false);
+
+	rcc_periph_clock_enable(RCC_TIM3);
+	rcc_periph_reset_pulse(RST_TIM3);
+	timer_set_mode(TILT_STEP_TIMER, TIM_CR1_CKD_CK_INT, TIM_CR1_CMS_EDGE,
+		       TIM_CR1_DIR_UP);
+	timer_set_prescaler(TILT_STEP_TIMER, TILT_STEP_TIMER_PRESCALER);
+	timer_set_period(TILT_STEP_TIMER, TILT_STEP_TIMER_PERIOD);
+	timer_one_shot_mode(TILT_STEP_TIMER);
+	timer_set_oc_mode(TILT_STEP_TIMER, TIM_OC3, TIM_OCM_PWM2);
+	timer_set_oc_value(TILT_STEP_TIMER, TIM_OC3,
+			   TILT_STEP_TIMER_RISE_TICK);
+	timer_set_oc_polarity_high(TILT_STEP_TIMER, TIM_OC3);
+	timer_enable_oc_output(TILT_STEP_TIMER, TIM_OC3);
+
+	/* STEP remains a low GPIO until every one-shot register is loaded. */
+	timer_generate_event(TILT_STEP_TIMER, TIM_EGR_UG);
+	timer_clear_flag(TILT_STEP_TIMER, TIM_SR_UIF);
+	timer_set_counter(TILT_STEP_TIMER, 0U);
+	board_tilt_step_use_timer();
+}
+
+void stepper_tilt_set_enabled(bool enabled)
+{
+	board_tilt_set_enabled(enabled);
+}
+
+void stepper_tilt_set_direction(bool positive)
+{
+	board_tilt_set_direction(positive);
+}
+
+void stepper_tilt_set_direction_raw(bool high)
+{
+	board_tilt_set_direction_raw(high);
+}
+
+void stepper_tilt_emit_pulse(void)
+{
+	timer_set_counter(TILT_STEP_TIMER, 0U);
+	timer_clear_flag(TILT_STEP_TIMER, TIM_SR_UIF);
+	timer_enable_counter(TILT_STEP_TIMER);
 }

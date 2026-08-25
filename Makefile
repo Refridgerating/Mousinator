@@ -79,19 +79,22 @@ firmware.bin: $(BUILD_DIR)/$(PROJECT).elf
 
 test: tests/protocol_test tests/motion_test tests/board_mapping_test \
 		tests/tmc2209_test tests/driver_control_test \
-		tests/tmc_uart_diagnostics_test
+		tests/tmc_uart_diagnostics_test tests/tilt_reference_test
 	./tests/protocol_test
 	./tests/motion_test
 	./tests/board_mapping_test
 	./tests/tmc2209_test
 	./tests/driver_control_test
 	./tests/tmc_uart_diagnostics_test
+	./tests/tilt_reference_test
 	$(PYTHON) tests/tmc_uart_transport_test.py
+	$(PYTHON) tests/m4_hardware_structure_test.py
 	$(PYTHON) tests/host_test.py
 
 tests/protocol_test: tests/protocol_test.c src/protocol.c src/tmc2209.c \
 		src/tmc_uart_diagnostics.c \
-		include/protocol.h include/pan_controller.h include/motion.h \
+		include/protocol.h include/motion_controller.h include/motion.h \
+		include/tilt_reference.h include/board.h \
 		include/driver_control.h include/tmc2209.h
 	$(HOST_CC) -std=c11 -O2 -Iinclude -Wall -Wextra -Wshadow -Wconversion \
 		-Wundef -Werror tests/protocol_test.c src/protocol.c src/tmc2209.c \
@@ -100,6 +103,12 @@ tests/protocol_test: tests/protocol_test.c src/protocol.c src/tmc2209.c \
 tests/motion_test: tests/motion_test.c src/motion.c include/motion.h
 	$(HOST_CC) -std=c11 -O2 -Iinclude -Wall -Wextra -Wshadow -Wconversion \
 		-Wundef -Werror tests/motion_test.c src/motion.c -o $@
+
+tests/tilt_reference_test: tests/tilt_reference_test.c src/tilt_reference.c \
+		src/motion.c include/tilt_reference.h include/motion.h
+	$(HOST_CC) -std=c11 -O2 -Iinclude -Wall -Wextra -Wshadow -Wconversion \
+		-Wundef -Werror tests/tilt_reference_test.c src/tilt_reference.c \
+		src/motion.c -o $@
 
 tests/board_mapping_test: tests/board_mapping_test.c include/board.h \
 		include/tmc2209.h include/tmc_uart.h
@@ -131,6 +140,7 @@ clean:
 		tests/board_mapping_test.exe tests/tmc2209_test \
 		tests/tmc2209_test.exe tests/driver_control_test \
 		tests/driver_control_test.exe tests/tmc_uart_diagnostics_test \
-		tests/tmc_uart_diagnostics_test.exe
+		tests/tmc_uart_diagnostics_test.exe tests/tilt_reference_test \
+		tests/tilt_reference_test.exe
 
 -include $(DEPENDENCIES)

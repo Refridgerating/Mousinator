@@ -15,7 +15,7 @@ CONFIDENCE_THRESHOLD = 0.1
 # How close the target center must be to image center to count as centered
 DEAD_ZONE_PIXELS = 40
 
-TARGET_CLASS = "person"  # Only detect this class (must be in YOLO model)
+TARGET_CLASS = "animal_mouse"  # Change this to the class you want to track
 
 # -----------------------------
 # Setup

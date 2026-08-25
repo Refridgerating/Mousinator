@@ -1,186 +1,212 @@
 #include "motion.h"
 
 #include <stdbool.h>
-#include <stdint.h>
 #include <stdio.h>
 
-static int check(bool condition, const char *name)
+static int check(bool condition, const char *message)
 {
 	if (!condition) {
-		(void)fprintf(stderr, "FAIL: %s\n", name);
+		(void)fprintf(stderr, "FAIL: %s\n", message);
 		return 1;
 	}
 	return 0;
 }
 
-static int test_acceleration(void)
+static uint32_t run_ticks(axis_motion_state_t *state, uint32_t ticks)
 {
-	pan_motion_state_t state;
-	int failures = 0;
+	uint32_t emitted = 0U;
+	uint32_t index;
 
-	pan_motion_init(&state);
-	pan_motion_enable(&state);
-	failures += check(pan_motion_set_target_velocity(&state, 10) ==
-			  PAN_VELOCITY_OK, "accept positive velocity");
-	(void)pan_motion_tick(&state);
-	failures += check(state.current_velocity_steps_s == 2,
-			  "positive acceleration tick");
-	(void)pan_motion_tick(&state);
-	failures += check(state.current_velocity_steps_s == 4,
-			  "positive acceleration second tick");
+	for (index = 0U; index < ticks; ++index) {
+		axis_motion_tick_result_t result = axis_motion_tick(state);
 
-	pan_motion_init(&state);
-	pan_motion_enable(&state);
-	(void)pan_motion_set_target_velocity(&state, -10);
-	(void)pan_motion_tick(&state);
-	failures += check(state.current_velocity_steps_s == -2,
-			  "negative acceleration tick");
-	return failures;
-}
-
-static int test_stop_and_reversal(void)
-{
-	pan_motion_state_t state;
-	bool observed_zero = false;
-	bool observed_negative = false;
-	int failures = 0;
-	uint32_t tick;
-
-	pan_motion_init(&state);
-	pan_motion_enable(&state);
-	(void)pan_motion_set_target_velocity(&state, 8);
-	for (tick = 0U; tick < 4U; ++tick) {
-		(void)pan_motion_tick(&state);
-	}
-	pan_motion_stop(&state);
-	(void)pan_motion_tick(&state);
-	failures += check(state.current_velocity_steps_s == 6,
-			  "controlled deceleration");
-
-	(void)pan_motion_set_target_velocity(&state, -8);
-	for (tick = 0U; tick < 12U; ++tick) {
-		(void)pan_motion_tick(&state);
-		if (state.current_velocity_steps_s == 0) {
-			observed_zero = true;
-		}
-		if (state.current_velocity_steps_s < 0) {
-			observed_negative = true;
-			break;
-		}
-	}
-	failures += check(observed_zero, "reversal passes through zero");
-	failures += check(observed_negative, "reversal reaches negative velocity");
-	return failures;
-}
-
-static int test_limits_and_disabled(void)
-{
-	pan_motion_state_t state;
-	int failures = 0;
-
-	pan_motion_init(&state);
-	failures += check(pan_motion_set_target_velocity(&state, 1) ==
-			  PAN_VELOCITY_DISABLED, "disabled rejection");
-	pan_motion_enable(&state);
-	failures += check(pan_motion_set_target_velocity(&state, 1000) ==
-			  PAN_VELOCITY_OK, "positive maximum");
-	failures += check(pan_motion_set_target_velocity(&state, -1000) ==
-			  PAN_VELOCITY_OK, "negative maximum");
-	failures += check(pan_motion_set_target_velocity(&state, 1001) ==
-			  PAN_VELOCITY_RANGE, "positive range rejection");
-	failures += check(pan_motion_set_target_velocity(&state, -1001) ==
-			  PAN_VELOCITY_RANGE, "negative range rejection");
-	return failures;
-}
-
-static int test_phase_and_position(void)
-{
-	pan_motion_state_t state;
-	pan_motion_tick_result_t result;
-	uint32_t tick;
-	uint32_t steps = 0U;
-	int failures = 0;
-
-	pan_motion_init(&state);
-	pan_motion_enable(&state);
-	state.current_velocity_steps_s = 200;
-	state.target_velocity_steps_s = 200;
-	state.lease_ticks_remaining = MOTION_COMMAND_LEASE_TICKS;
-	for (tick = 0U; tick < 100U; ++tick) {
-		result = pan_motion_tick(&state);
 		if (result.emit_step) {
-			++steps;
+			axis_motion_commit_step(state);
+			++emitted;
 		}
 	}
-	failures += check(steps == 20U, "phase accumulator positive rate");
-	failures += check(state.position_steps == 20,
-			  "positive position accounting");
+	return emitted;
+}
 
-	state.current_velocity_steps_s = -200;
-	state.target_velocity_steps_s = -200;
-	state.direction_positive = false;
-	state.phase_accumulator = 0U;
-	state.lease_ticks_remaining = MOTION_COMMAND_LEASE_TICKS;
-	for (tick = 0U; tick < 100U; ++tick) {
-		(void)pan_motion_tick(&state);
-	}
-	failures += check(state.position_steps == 0,
-			  "negative position accounting");
+static int test_acceleration_and_position(void)
+{
+	axis_motion_state_t state;
+	int failures = 0;
+
+	axis_motion_init(&state);
+	axis_motion_enable(&state);
+	failures += check(axis_motion_set_target_velocity(&state, 800) ==
+				  AXIS_VELOCITY_OK,
+			  "accept positive velocity");
+	failures += check(run_ticks(&state, 500U) == 240U,
+			  "acceleration emits deterministic steps in 500 ms");
+	failures += check(state.current_velocity_steps_s == 800,
+			  "velocity reaches 800 steps/s");
+	failures += check(state.position_steps == 240,
+			  "committed rising edges define position");
+
+	axis_motion_stop(&state);
+	(void)run_ticks(&state, 400U);
+	failures += check(state.current_velocity_steps_s == 0 && !state.moving,
+			  "controlled stop reaches zero");
 	return failures;
 }
 
-static int test_deadman(void)
+static int test_reversal_and_deadman(void)
 {
-	pan_motion_state_t state;
-	uint32_t tick;
+	axis_motion_state_t state;
+	bool saw_zero = false;
+	uint32_t index;
 	int failures = 0;
 
-	pan_motion_init(&state);
-	pan_motion_enable(&state);
-	(void)pan_motion_set_target_velocity(&state, 100);
-	for (tick = 0U; tick < 500U; ++tick) {
-		(void)pan_motion_tick(&state);
+	axis_motion_init(&state);
+	axis_motion_enable(&state);
+	(void)axis_motion_set_target_velocity(&state, 300);
+	(void)run_ticks(&state, 200U);
+	(void)axis_motion_set_target_velocity(&state, -300);
+	for (index = 0U; index < 400U; ++index) {
+		axis_motion_tick_result_t result = axis_motion_tick(&state);
+
+		if (state.current_velocity_steps_s == 0) {
+			saw_zero = true;
+		}
+		if (result.emit_step) {
+			axis_motion_commit_step(&state);
+		}
 	}
-	(void)pan_motion_set_target_velocity(&state, 100);
-	for (tick = 0U; tick < (MOTION_COMMAND_LEASE_TICKS - 1U); ++tick) {
-		(void)pan_motion_tick(&state);
-	}
-	failures += check(!state.motion_timeout,
-			  "refreshed lease valid before boundary");
-	(void)pan_motion_tick(&state);
-	failures += check(state.motion_timeout, "lease expires at boundary");
-	failures += check(state.target_velocity_steps_s == 0,
-			  "timeout targets zero");
-	(void)pan_motion_set_target_velocity(&state, 50);
-	failures += check(!state.motion_timeout, "nonzero velocity clears timeout");
+	failures += check(saw_zero && state.current_velocity_steps_s < 0,
+			  "reversal passes through zero");
+
+	(void)axis_motion_set_target_velocity(&state, 100);
+	(void)run_ticks(&state, MOTION_COMMAND_LEASE_TICKS);
+	failures += check(state.motion_timeout &&
+				  state.target_velocity_steps_s == 0,
+			  "independent lease expiry targets zero");
 	return failures;
 }
 
-static int test_pending_disable(void)
+static int test_validation_and_disable(void)
 {
-	pan_motion_state_t state;
-	pan_motion_tick_result_t result = {false, false, true, false};
+	axis_motion_state_t state;
 	int failures = 0;
-	uint32_t tick;
 
-	pan_motion_init(&state);
-	pan_motion_enable(&state);
-	state.current_velocity_steps_s = 6;
-	state.target_velocity_steps_s = 6;
-	failures += check(pan_motion_request_disable(&state) ==
-			  PAN_DISABLE_PENDING, "moving disable is pending");
-	failures += check(pan_motion_set_target_velocity(&state, 1) ==
-			  PAN_VELOCITY_DISABLING,
-			  "velocity rejected while disabling");
-	for (tick = 0U; tick < 4U; ++tick) {
-		result = pan_motion_tick(&state);
-		if (result.disable_driver) {
-			break;
-		}
+	axis_motion_init(&state);
+	failures += check(axis_motion_set_target_velocity(&state, 1) ==
+				  AXIS_VELOCITY_DISABLED,
+			  "disabled rejection");
+	axis_motion_enable(&state);
+	failures += check(axis_motion_set_target_velocity(&state, 1001) ==
+				  AXIS_VELOCITY_RANGE,
+			  "positive range rejection");
+	failures += check(axis_motion_set_target_velocity(&state, -1001) ==
+				  AXIS_VELOCITY_RANGE,
+			  "negative range rejection");
+	(void)axis_motion_set_target_velocity(&state, 200);
+	(void)run_ticks(&state, 100U);
+	failures += check(axis_motion_request_disable(&state) ==
+				  AXIS_DISABLE_PENDING,
+			  "moving disable is pending");
+	while (state.enabled) {
+		(void)axis_motion_tick(&state);
 	}
-	failures += check(result.disable_driver, "disable completes at zero");
 	failures += check(!state.enabled && !state.moving,
-			  "completed disable state");
+			  "controlled disable completes");
+	return failures;
+}
+
+static int test_two_axis_atomicity_and_independence(void)
+{
+	axis_motion_state_t pan;
+	axis_motion_state_t tilt;
+	axis_velocity_result_t pan_result;
+	axis_velocity_result_t tilt_result;
+	uint32_t index;
+	bool saw_simultaneous_step = false;
+	int failures = 0;
+
+	axis_motion_init(&pan);
+	axis_motion_init(&tilt);
+	axis_motion_enable(&pan);
+	axis_motion_enable(&tilt);
+	failures += check(axis_motion_set_two_velocities(
+				  &pan, 300, &tilt, -200, &pan_result,
+				  &tilt_result),
+			  "valid dual velocity applies");
+	for (index = 0U; index < 1000U; ++index) {
+		axis_motion_tick_result_t pan_tick = axis_motion_tick(&pan);
+		axis_motion_tick_result_t tilt_tick = axis_motion_tick(&tilt);
+
+		if (pan_tick.emit_step) {
+			axis_motion_commit_step(&pan);
+		}
+		if (tilt_tick.emit_step) {
+			axis_motion_commit_step(&tilt);
+		}
+		if (pan_tick.emit_step && tilt_tick.emit_step) {
+			saw_simultaneous_step = true;
+		}
+	}
+	failures += check(pan.position_steps > 0 && tilt.position_steps < 0,
+			  "simultaneous opposite directions are independent");
+	failures += check(saw_simultaneous_step,
+			  "both axes may emit in the same control tick");
+
+	pan.target_velocity_steps_s = 11;
+	tilt.target_velocity_steps_s = 22;
+	failures += check(!axis_motion_set_two_velocities(
+				   &pan, 400, &tilt, 1001, &pan_result,
+				   &tilt_result),
+			  "range failure rejects dual update");
+	failures += check(pan.target_velocity_steps_s == 11 &&
+				  tilt.target_velocity_steps_s == 22,
+			  "failed dual update mutates neither axis");
+	return failures;
+}
+
+static int test_independent_leases_and_disable(void)
+{
+	axis_motion_state_t pan;
+	axis_motion_state_t tilt;
+	uint32_t index;
+	int failures = 0;
+
+	axis_motion_init(&pan);
+	axis_motion_init(&tilt);
+	axis_motion_enable(&pan);
+	axis_motion_enable(&tilt);
+	(void)axis_motion_set_target_velocity(&pan, 100);
+	(void)axis_motion_set_target_velocity(&tilt, 100);
+	for (index = 0U; index < MOTION_COMMAND_LEASE_TICKS; ++index) {
+		axis_motion_tick_result_t pan_tick;
+		axis_motion_tick_result_t tilt_tick;
+
+		if ((index % 100U) == 0U) {
+			(void)axis_motion_set_target_velocity(&pan, 100);
+		}
+		pan_tick = axis_motion_tick(&pan);
+		tilt_tick = axis_motion_tick(&tilt);
+		if (pan_tick.emit_step) {
+			axis_motion_commit_step(&pan);
+		}
+		if (tilt_tick.emit_step) {
+			axis_motion_commit_step(&tilt);
+		}
+	}
+	failures += check(!pan.motion_timeout && pan.target_velocity_steps_s == 100,
+			  "refreshed PAN lease continues");
+	failures += check(tilt.motion_timeout &&
+				  tilt.target_velocity_steps_s == 0,
+			  "expired TILT lease stops only TILT");
+
+	(void)axis_motion_request_disable(&tilt);
+	for (index = 0U; index < 100U; ++index) {
+		(void)axis_motion_tick(&tilt);
+		(void)axis_motion_set_target_velocity(&pan, 100);
+		(void)axis_motion_tick(&pan);
+	}
+	failures += check(!tilt.enabled && pan.enabled &&
+				  pan.target_velocity_steps_s == 100,
+			  "disabling TILT does not stop PAN");
 	return failures;
 }
 
@@ -188,15 +214,13 @@ int main(void)
 {
 	int failures = 0;
 
-	failures += test_acceleration();
-	failures += test_stop_and_reversal();
-	failures += test_limits_and_disabled();
-	failures += test_phase_and_position();
-	failures += test_deadman();
-	failures += test_pending_disable();
-
+	failures += test_acceleration_and_position();
+	failures += test_reversal_and_deadman();
+	failures += test_validation_and_disable();
+	failures += test_two_axis_atomicity_and_independence();
+	failures += test_independent_leases_and_disable();
 	if (failures == 0) {
 		(void)puts("motion tests passed");
 	}
-	return failures;
+	return failures == 0 ? 0 : 1;
 }

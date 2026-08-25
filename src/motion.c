@@ -20,23 +20,19 @@ static int32_t approach_velocity(int32_t current, int32_t target)
 	return target;
 }
 
-static void record_step(pan_motion_state_t *state)
+static void apply_velocity(axis_motion_state_t *state,
+			   int32_t velocity_steps_s)
 {
-	/* Define wrap explicitly rather than relying on signed-overflow behavior. */
-	if (state->direction_positive) {
-		if (state->position_steps == INT64_MAX) {
-			state->position_steps = INT64_MIN;
-		} else {
-			++state->position_steps;
-		}
-	} else if (state->position_steps == INT64_MIN) {
-		state->position_steps = INT64_MAX;
+	state->target_velocity_steps_s = velocity_steps_s;
+	if (velocity_steps_s == 0) {
+		state->lease_ticks_remaining = 0U;
 	} else {
-		--state->position_steps;
+		state->lease_ticks_remaining = MOTION_COMMAND_LEASE_TICKS;
+		state->motion_timeout = false;
 	}
 }
 
-void pan_motion_init(pan_motion_state_t *state)
+void axis_motion_init(axis_motion_state_t *state)
 {
 	state->position_steps = 0;
 	state->target_velocity_steps_s = 0;
@@ -50,7 +46,7 @@ void pan_motion_init(pan_motion_state_t *state)
 	state->direction_positive = true;
 }
 
-void pan_motion_enable(pan_motion_state_t *state)
+void axis_motion_enable(axis_motion_state_t *state)
 {
 	if (!state->enabled) {
 		state->target_velocity_steps_s = 0;
@@ -64,57 +60,103 @@ void pan_motion_enable(pan_motion_state_t *state)
 	}
 }
 
-pan_disable_result_t pan_motion_request_disable(pan_motion_state_t *state)
+axis_disable_result_t axis_motion_request_disable(axis_motion_state_t *state)
 {
 	state->target_velocity_steps_s = 0;
 	state->lease_ticks_remaining = 0U;
 
 	if (!state->enabled || (state->current_velocity_steps_s == 0)) {
-		state->current_velocity_steps_s = 0;
-		state->phase_accumulator = 0U;
-		state->moving = false;
+		axis_motion_force_stop(state);
 		state->disabling = false;
 		state->enabled = false;
-		return PAN_DISABLE_COMPLETE;
+		return AXIS_DISABLE_COMPLETE;
 	}
 
 	state->disabling = true;
-	return PAN_DISABLE_PENDING;
+	return AXIS_DISABLE_PENDING;
 }
 
-pan_velocity_result_t pan_motion_set_target_velocity(
-	pan_motion_state_t *state, int32_t velocity_steps_s)
+axis_velocity_result_t axis_motion_validate_velocity(
+	const axis_motion_state_t *state, int32_t velocity_steps_s)
 {
-	if ((velocity_steps_s > PAN_MAX_ABSOLUTE_VELOCITY_STEPS_S) ||
-	    (velocity_steps_s < -PAN_MAX_ABSOLUTE_VELOCITY_STEPS_S)) {
-		return PAN_VELOCITY_RANGE;
+	if ((velocity_steps_s > AXIS_MAX_ABSOLUTE_VELOCITY_STEPS_S) ||
+	    (velocity_steps_s < -AXIS_MAX_ABSOLUTE_VELOCITY_STEPS_S)) {
+		return AXIS_VELOCITY_RANGE;
 	}
 	if (!state->enabled) {
-		return PAN_VELOCITY_DISABLED;
+		return AXIS_VELOCITY_DISABLED;
 	}
 	if (state->disabling) {
-		return PAN_VELOCITY_DISABLING;
+		return AXIS_VELOCITY_DISABLING;
 	}
-
-	state->target_velocity_steps_s = velocity_steps_s;
-	if (velocity_steps_s == 0) {
-		state->lease_ticks_remaining = 0U;
-	} else {
-		state->lease_ticks_remaining = MOTION_COMMAND_LEASE_TICKS;
-		state->motion_timeout = false;
-	}
-	return PAN_VELOCITY_OK;
+	return AXIS_VELOCITY_OK;
 }
 
-void pan_motion_stop(pan_motion_state_t *state)
+axis_velocity_result_t axis_motion_set_target_velocity(
+	axis_motion_state_t *state, int32_t velocity_steps_s)
+{
+	axis_velocity_result_t result =
+		axis_motion_validate_velocity(state, velocity_steps_s);
+
+	if (result == AXIS_VELOCITY_OK) {
+		apply_velocity(state, velocity_steps_s);
+	}
+	return result;
+}
+
+bool axis_motion_set_two_velocities(axis_motion_state_t *first,
+				    int32_t first_velocity_steps_s,
+				    axis_motion_state_t *second,
+				    int32_t second_velocity_steps_s,
+				    axis_velocity_result_t *first_result,
+				    axis_velocity_result_t *second_result)
+{
+	*first_result = axis_motion_validate_velocity(first,
+						     first_velocity_steps_s);
+	*second_result = axis_motion_validate_velocity(second,
+						      second_velocity_steps_s);
+	if ((*first_result != AXIS_VELOCITY_OK) ||
+	    (*second_result != AXIS_VELOCITY_OK)) {
+		return false;
+	}
+
+	apply_velocity(first, first_velocity_steps_s);
+	apply_velocity(second, second_velocity_steps_s);
+	return true;
+}
+
+void axis_motion_set_internal_velocity(axis_motion_state_t *state,
+				       int32_t velocity_steps_s)
+{
+	state->target_velocity_steps_s = velocity_steps_s;
+	state->lease_ticks_remaining = 0U;
+	state->motion_timeout = false;
+}
+
+void axis_motion_stop(axis_motion_state_t *state)
 {
 	state->target_velocity_steps_s = 0;
 	state->lease_ticks_remaining = 0U;
 }
 
-pan_motion_tick_result_t pan_motion_tick(pan_motion_state_t *state)
+void axis_motion_force_stop(axis_motion_state_t *state)
 {
-	pan_motion_tick_result_t result = {
+	state->target_velocity_steps_s = 0;
+	state->current_velocity_steps_s = 0;
+	state->phase_accumulator = 0U;
+	state->lease_ticks_remaining = 0U;
+	state->moving = false;
+}
+
+void axis_motion_set_position(axis_motion_state_t *state,
+			      int64_t position_steps)
+{
+	state->position_steps = position_steps;
+}
+
+axis_motion_tick_result_t axis_motion_tick(axis_motion_state_t *state)
+{
+	axis_motion_tick_result_t result = {
 		.emit_step = false,
 		.direction_changed = false,
 		.direction_positive = state->direction_positive,
@@ -171,8 +213,23 @@ pan_motion_tick_result_t pan_motion_tick(pan_motion_state_t *state)
 	if (state->phase_accumulator >= MOTION_CONTROL_FREQUENCY_HZ) {
 		state->phase_accumulator -= MOTION_CONTROL_FREQUENCY_HZ;
 		result.emit_step = true;
-		record_step(state);
 	}
 
 	return result;
+}
+
+void axis_motion_commit_step(axis_motion_state_t *state)
+{
+	/* Define wrap explicitly rather than relying on signed-overflow behavior. */
+	if (state->direction_positive) {
+		if (state->position_steps == INT64_MAX) {
+			state->position_steps = INT64_MIN;
+		} else {
+			++state->position_steps;
+		}
+	} else if (state->position_steps == INT64_MIN) {
+		state->position_steps = INT64_MAX;
+	} else {
+		--state->position_steps;
+	}
 }

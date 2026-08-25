@@ -30,6 +30,7 @@ tests/protocol_test
 tests/tmc2209_test
 tests/driver_control_test
 tests/tmc_uart_diagnostics_test
+tests/tilt_reference_test
 tests/*.exe
 
 # Editors / OS

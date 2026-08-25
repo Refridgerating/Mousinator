@@ -19,7 +19,7 @@
 #define BOARD_PAN_ENABLE_PIN_MASK (1U << BOARD_PAN_ENABLE_PIN_NUMBER)
 #define BOARD_PAN_ENABLE_ACTIVE_LOW 1U
 
-/* TILT is not implemented; ZAM and ZBM are parallel Z-driver connectors. */
+/* ZAM and ZBM are parallel outputs from the same TILT/Z driver. */
 #define BOARD_TILT_STEP_GPIO_PORT BOARD_GPIO_PORT_B
 #define BOARD_TILT_STEP_PIN_NUMBER 0U
 #define BOARD_TILT_STEP_PIN_MASK (1U << BOARD_TILT_STEP_PIN_NUMBER)
@@ -31,6 +31,14 @@
 #define BOARD_TILT_ENABLE_PIN_MASK (1U << BOARD_TILT_ENABLE_PIN_NUMBER)
 #define BOARD_TILT_ENABLE_ACTIVE_LOW 1U
 #define BOARD_ZAM_ZBM_PARALLEL_OUTPUTS 1U
+#define BOARD_TILT_ENDSTOP_GPIO_PORT BOARD_GPIO_PORT_C
+#define BOARD_TILT_ENDSTOP_PIN_NUMBER 2U
+#define BOARD_TILT_ENDSTOP_PIN_MASK (1U << BOARD_TILT_ENDSTOP_PIN_NUMBER)
+#define BOARD_TILT_ENDSTOP_ACTIVE_LOW 1U
+
+/* Set these only after the bounded physical PC5 direction check. */
+#define BOARD_TILT_DIRECTION_CALIBRATED 0U
+#define BOARD_TILT_POSITIVE_DIRECTION_HIGH 0U
 
 /* Shared TMC2209 UART uses USART3 partial remap on PC10/PC11. */
 #define BOARD_TMC_UART_TX_GPIO_PORT BOARD_GPIO_PORT_C
@@ -58,6 +66,13 @@ void board_usb_connect(bool connected);
 void board_pan_set_enabled(bool enabled);
 void board_pan_set_direction(bool positive);
 void board_pan_step_use_timer(void);
+
+void board_tilt_set_enabled(bool enabled);
+void board_tilt_set_direction(bool positive);
+void board_tilt_set_direction_raw(bool high);
+void board_tilt_step_use_timer(void);
+bool board_tilt_endstop_raw_high(void);
+bool board_tilt_endstop_triggered(void);
 
 /* Configure USART3 partial remap without disturbing the PAN timer remap. */
 void board_tmc_uart_use_usart(void);

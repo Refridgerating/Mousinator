@@ -19,16 +19,18 @@ The README should be updated as firmware capabilities are added and hardware beh
 Current development focus:
 
 ```text
-M3: TMC2209 UART hardware validation
+M4: two-axis PAN/TILT motion and bounded TILT commissioning
 ```
 
 - M0 hardware validation: **PASS**
 - M1 hardware validation: **PASS**
 - M2 hardware validation: **PASS**
+- M3 hardware validation: **PASS**
 
-M3 is implemented and build-verified. Its USART3 electrical behavior and TMC
-configuration remain hardware-unvalidated until the M3-A and M3-B procedures
-below pass on the SKR Mini E3 V2.0.
+M3 passed powered-board validation at 40000 baud with separated transmit and
+receive phases, zero UART errors, zero retries, and repeatable independent PAN
+and TILT configuration. M4 development may therefore build on the validated
+driver transport and configuration.
 
 Implemented behavior:
 
@@ -37,9 +39,9 @@ Implemented behavior:
 - all STEP and DIR outputs held low
 - heater and controllable fan MOSFET outputs explicitly held OFF
 - polling-based USB CDC ACM, independent of DTR/RTS state
-- bounded text protocol supporting `PING`, `INFO`, and M2 PAN commands
-- TIM3-driven integer acceleration and motion-command deadman
-- TIM2_CH3 hardware one-shot STEP pulses on PB10
+- bounded text protocol supporting independent PAN/TILT motion and commissioning
+- TIM4-driven integer acceleration and independent motion-command leases
+- TIM2_CH3 PAN and TIM3_CH3 TILT hardware one-shot STEP pulses
 - polling USART3 TMC2209 diagnostics and fixed, host-triggered configuration
 - PAN enable gating on a configured, nonfatal driver state
 - fixed-size static buffers with no dynamic allocation
@@ -124,7 +126,7 @@ Sentry motor mapping:
 
 ```text
 YM connector / Y driver  = PAN
-ZAM connector / Z driver = TILT (not implemented yet)
+ZAM+ZBM / Z driver        = TILT (parallel outputs, one logical axis)
 ```
 
 ZAM and ZBM are parallel motor connectors driven by the same Z driver. They
@@ -249,7 +251,7 @@ Firmware information:
 
 ```text
 > INFO
-< OK SENTRY-MCU 0.3.0 SKR_MINI_E3_V2
+< OK SENTRY-MCU 0.4.0 SKR_MINI_E3_V2
 ```
 
 Commands are ASCII, case-sensitive, and terminated by CR, LF, or CRLF.
@@ -333,7 +335,7 @@ DRIVER CONFIGURE
 Boot probes both TMC2209 addresses and verifies the non-behavior-changing
 write path, but intentionally does not configure current, microsteps, or the
 chopper. `DRIVER CONFIGURE` applies the fixed M3 configuration independently
-to PAN and TILT and is allowed only while PAN is fully disabled. Configuration
+to PAN and TILT and is allowed only while both axes are fully disabled. Configuration
 lasts for the current power cycle; it writes neither OTP nor MCU flash.
 Drivers already verified as configured and nonfatal are left untouched, so a
 retry can recover one driver without rewriting the other or incrementing its
@@ -385,6 +387,52 @@ OK DRIVER_DIAG TILT ADDR=1 UART_ORE=0 UART_NE=4 UART_FE=0 UART_PE=0 UART_LAST_AD
 `UART_FLAGS` uses the STM32 USART status bit positions in a compact mask:
 PE=`0x01`, FE=`0x02`, NE=`0x04`, and ORE=`0x08`. Counters and retained history
 reset only when the MCU resets; no host command clears them.
+
+M4 adds independent and atomic two-axis motion:
+
+```text
+ENABLE PAN
+ENABLE TILT
+DISABLE PAN
+DISABLE TILT
+VEL PAN <signed_steps_per_second>
+VEL TILT <signed_steps_per_second>
+VEL BOTH <pan_steps_per_second> <tilt_steps_per_second>
+STOP
+STATE?
+STATE? PAN
+STATE? TILT
+ENDSTOP? TILT
+HOME TILT
+JOG TILT <signed_steps>
+DIR-CHECK TILT HIGH|LOW
+```
+
+Bare `STATE?` remains the M2 PAN response. `VEL BOTH` validates both complete
+commands before changing either target, and each nonzero target has its own
+1000 ms lease. `STOP` commands both axes toward zero. TILT velocity and JOG
+require a successful home; reset or `DISABLE TILT` clears the reference.
+
+The Z endstop is PC2 with an internal pull-up. Open reads HIGH and an actuated
+switch reads LOW. `ENDSTOP? TILT` is read-only and must be manually checked
+before homing. The production build deliberately starts with TILT direction
+uncalibrated. With the mechanism clear of the switch, `DIR-CHECK TILT HIGH` or
+`LOW` emits exactly ten slow edges and disables again. Set
+`BOARD_TILT_POSITIVE_DIRECTION_HIGH` and `BOARD_TILT_DIRECTION_CALIBRATED` only
+after observing which PC5 level rotates clockwise away from home.
+
+Homing is asynchronous and bounded: release if initially triggered, approach
+at 150 steps/s, back off at 50 steps/s, and re-approach at 50 steps/s. The fast
+search stops after 1000 external STEP edges and each release/re-approach phase
+is bounded to 50 edges. A raw trigger immediately suppresses further negative
+edges; five stable 1 kHz samples qualify trigger and release. Success sets TILT
+position exactly to zero and leaves the motor enabled.
+
+There is intentionally no positive TILT software maximum in this M4 build.
+`STATE? TILT` reports `MAX_CONFIGURED=0 MAX_LIMIT=0`. Use only repeated bounded
+`JOG TILT +50` commands while observing the mechanism, record the largest safe
+physical position, then select a later `TILT_MAX_STEPS` inside it with a safety
+margin. Keep power disconnect immediately accessible during commissioning.
 
 The protocol may evolve as requirements become clearer.
 
@@ -510,7 +558,7 @@ OK PONG
 Repeat with `printf 'INFO\r\n' > "$DEVICE"` and expect:
 
 ```text
-OK SENTRY-MCU 0.3.0 SKR_MINI_E3_V2
+OK SENTRY-MCU 0.4.0 SKR_MINI_E3_V2
 ```
 
 These commands are the physical validation procedure used for M1. Hardware
@@ -625,26 +673,22 @@ motion was observed on other outputs.
 
 ## M3 TMC2209 Architecture
 
-The shared TMC bus currently uses STM32 USART3 at 40000 baud, 8 data bits, no
-parity, and one stop bit. This is an M3 transport experiment based on the
-known-good Klipper TMC UART rate after powered-board diagnostics showed
-recovered FE, ORE, and NE events at 115200 baud; it is not yet a final
-architecture decision. USART3 AFIO partial remap (`01`) routes TX to PC10 and
+The shared TMC bus uses STM32 USART3 at 40000 baud, 8 data bits, no parity, and
+one stop bit. This is the hardware-validated M3 transport selected after
+powered-board diagnostics showed recovered FE, ORE, and NE events at 115200
+baud. USART3 AFIO partial remap (`01`) routes TX to PC10 and
 RX to PC11; full remap is not applicable because it routes to PD8/PD9. Every
 AFIO write also preserves TIM2 partial-remap 2 and the established disabled-SWJ
 setting, leaving M2 PAN STEP/DIR generation unchanged.
 
 The SKR schematic combines TX and RX through R72/R73 (100 ohm) and R74
-(1 kohm). Powered-board diagnostics at 40 kbaud showed framing errors while
-receiving the combined MCU self-echo and TMC reply stream, so this follow-up M3
-transport experiment separates transmit and receive phases in the same style
-as Klipper's TMC communication. USART3 RX is disabled while the four- or
+(1 kohm). The final transport separates transmit and receive phases. USART3 RX
+is disabled while the four- or
 eight-byte request is transmitted. After the final byte reaches `TC`, firmware
 clears TX-associated RX/error state while RX remains disabled, enables RX, and
 accepts only the expected eight-byte TMC read reply. Writes do not require an
 echo; IFCNT advancement and masked readable-register checks remain their
-authoritative verification. This is an experiment, not yet a final transport
-architecture decision.
+authoritative verification.
 
 Each attempt remains bounded to 5 ms and each transaction receives at most
 three attempts. At 40000 baud, an 8N1 read occupies 1.0 ms for the four-byte
@@ -657,7 +701,7 @@ ms. Error recovery now derives a twelve-bit idle-high interval from the same
 baud constant: 300 us at 40 kbaud. Baud, SENDDELAY, retry count, transaction
 timeout, diagnostics, and all driver and motion safety behavior are otherwise
 unchanged. All TMC I/O runs during boot or a USB command in main context;
-TIM2/TIM3 interrupt handlers never call it.
+motion timer interrupt handlers never call it.
 
 Datagrams follow TMC2209 Rev. 1.09 directly: sync `0x05`, four-byte reads,
 eight-byte writes/replies, data most-significant byte first, master reply
@@ -686,11 +730,21 @@ IHOLD_IRUN is write-only on the TMC2209, so its commanded current is verified
 through IFCNT rather than literal readback; readable registers use masked
 readback and DRV_STATUS retains the live `CS_ACTUAL` bits in its raw value.
 
-TILT is probed and configured to prove independent addressability, but it has
-no STEP generation or enable command. PB1 remains inactive high, and ZAM/ZBM
-remain parallel outputs from one disabled Z driver.
+ZAM and ZBM remain parallel outputs from the single TILT/Z driver and are never
+treated as independent axes.
 
 ## M3 Physical Validation
+
+Status: **PASS**.
+
+Repeated powered-board testing verified stable PAN address 2 and TILT address
+1 communication at 40000 baud with separated TX/RX phases, at least four bit
+times of post-reply guard, and at least twelve bit times of error-recovery
+guard. Diagnostics remained at zero ORE, NE, FE, and PE events with zero
+retries. Both drivers repeatedly verified 520 mA RMS run current, 275 mA RMS
+hold current, 16 microsteps, interpolation, and StealthChop. Repeated `DRIVER
+CONFIGURE` was idempotent with IFCNT remaining 9. PAN 300 and 800 step/s motion,
+the M2 deadman, and reset/unconfigured safety regressions all passed.
 
 M3-A is communication-only. Motors may remain disconnected, but normal SKR
 main power must be present:
@@ -725,8 +779,35 @@ python3 host/sentry_mcu.py --device /dev/serial/by-id/<sentry-device> motor-test
 Confirm healthy status, smooth forward/reverse motion, return to zero, no
 unexpected noise or heating, STOP/deadman/USB behavior, and no unused output
 activity. Because configuration is deliberately not persistent, repeat
-`DRIVER CONFIGURE` after every reset. M3 remains hardware-unvalidated until
-both stages and repeated-power-cycle initialization pass.
+`DRIVER CONFIGURE` after every reset.
+
+## M4 Timer Architecture and Commissioning
+
+TIM4 is the only 1 kHz motion-control interrupt. It advances independent PAN
+and TILT acceleration, phase, position, command-lease, disable, and TILT
+reference state. Both axes may request one STEP edge in the same control tick.
+
+TIM2_CH3 remains partial-remapped to PAN PB10. TIM3 is no longer the control
+timer: default TIM3_CH3 drives TILT PB0. Both STEP timers run at 1 us resolution
+with PSC=71, ARR=3, PWM2, and CCR3=2, producing a rising edge at 2 us and falling
+edge at 4 us without an ISR. PAN DIR/ENABLE remain PB2/PB11; TILT DIR/ENABLE are
+PC5/PB1. ZAM and ZBM are parallel connectors on the one Z/TILT driver.
+
+Use this staged physical workflow:
+
+```bash
+python3 host/sentry_mcu.py --device <device> configure-drivers
+python3 host/sentry_mcu.py --device <device> endstop
+# Manually press and release PC2 and confirm ENDSTOP/RAW invert.
+python3 host/sentry_mcu.py --device <device> tilt-dir-check --level high
+python3 host/sentry_mcu.py --device <device> tilt-dir-check --level low
+# Compile the observed clockwise level into board.h, flash again, then:
+python3 host/sentry_mcu.py --device <device> home-tilt
+python3 host/sentry_mcu.py --device <device> jog-tilt --steps 50
+```
+
+Start near the home switch, use short movement, and do not run HOME until both
+the switch state and clockwise PC5 level have been physically established.
 
 Future USB-based firmware updates may be investigated later.
 
@@ -872,7 +953,7 @@ Pan motor can be commanded safely in both directions.
 
 ## M3: TMC2209 Control
 
-Status: implemented and build-verified; M3-A/M3-B physical validation pending.
+Status: hardware-validated **PASS**.
 
 Goals:
 
@@ -887,12 +968,20 @@ Goals:
 
 ## M4: Two-Axis Motion
 
+Status: implemented and build-tested; physical direction, endstop, homing, and
+travel calibration pending.
+
 Goals:
 
 - pan and tilt
 - simultaneous motion
 - independent velocity commands
 - acceleration limits
+- bounded TILT direction commissioning and PC2 homing
+- exact-step calibration JOG
+
+The positive TILT software maximum remains intentionally deferred until the
+physical maximum and safety margin are measured.
 
 ---
 

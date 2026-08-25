@@ -129,7 +129,9 @@ int main(void)
 	result = driver_control_configure();
 	failures += check(result.pan_configured && result.tilt_configured &&
 			  pan_configure_calls == 1U &&
-			  tilt_configure_calls == 1U,
+			  tilt_configure_calls == 1U &&
+			  driver_control_ready(DRIVER_AXIS_PAN) &&
+			  driver_control_ready(DRIVER_AXIS_TILT),
 			  "initial independent configuration");
 	result = driver_control_configure();
 	failures += check(result.pan_configured && result.tilt_configured &&
@@ -147,13 +149,14 @@ int main(void)
 			  tilt->diagnostics.last_operation == TMC2209_OPERATION_READ &&
 			  pan->diagnostics.last_operation == TMC2209_OPERATION_NONE &&
 			  uart_snapshot.overrun_count == 1U &&
-			  driver_control_pan_ready(),
+			  driver_control_ready(DRIVER_AXIS_PAN) &&
+			  !driver_control_ready(DRIVER_AXIS_TILT),
 			  "TILT communication failure leaves PAN independently ready");
 	tilt_refresh_fails = false;
 	driver_control_refresh(DRIVER_AXIS_TILT);
 	failures += check(tilt->state == TMC2209_STATE_CONFIGURED &&
 			  tilt->configuration_valid &&
-			  driver_control_pan_ready(),
+			  driver_control_ready(DRIVER_AXIS_PAN),
 			  "TILT refresh recovery does not affect PAN");
 
 	tilt_refresh_fails = true;
@@ -165,7 +168,7 @@ int main(void)
 			  pan_configure_calls == 1U &&
 			  tilt_configure_calls == 2U &&
 			  pan_probe_calls == 0U && tilt_probe_calls == 1U &&
-			  driver_control_pan_ready(),
+			  driver_control_ready(DRIVER_AXIS_PAN),
 			  "TILT recovery failure never rewrites or revokes PAN");
 
 	if (failures == 0) {

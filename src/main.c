@@ -1,6 +1,6 @@
 #include "board.h"
 #include "driver_control.h"
-#include "pan_controller.h"
+#include "motion_controller.h"
 #include "protocol.h"
 #include "usb_serial.h"
 
@@ -20,7 +20,7 @@ int main(void)
 
 	board_safe_init();
 	board_clock_init();
-	pan_controller_init();
+	motion_controller_init();
 	protocol_init(&protocol, protocol_usb_write, NULL);
 	usb_serial_init();
 	board_usb_connect(true);

@@ -24,9 +24,12 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from host.sentry_mcu import (  # noqa: E402
+    AxisState,
     DriverDiagnostics,
     DriverStatus,
+    EndstopState,
     SentryMcu,
+    prepare_axis_motor_test,
     prepare_pan_motor_test,
     query_driver_report,
 )
@@ -109,6 +112,33 @@ class MotorTestPreparationTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             prepare_pan_motor_test(controller, output=lambda value: None)
 
+    def test_tilt_only_depends_on_tilt_readiness(self):
+        class TiltController:
+            def __init__(self):
+                self.tilt_statuses = iter(
+                    [
+                        status("tilt", configured=False),
+                        status("tilt", configured=True),
+                    ]
+                )
+                self.commands = []
+
+            def driver(self, axis):
+                if axis == "tilt":
+                    return next(self.tilt_statuses)
+                return status("pan", configured=False, error="TIMEOUT")
+
+            def command(self, command):
+                self.commands.append(command)
+                return "ERR DRIVER_CONFIG PAN=ERROR TILT=CONFIGURED"
+
+        controller = TiltController()
+        result = prepare_axis_motor_test(
+            controller, "tilt", output=lambda value: None
+        )
+        self.assertTrue(result.configured)
+        self.assertEqual(controller.commands, ["DRIVER CONFIGURE"])
+
 
 class DriverDiagnosticTests(unittest.TestCase):
     RESPONSE = (
@@ -156,6 +186,46 @@ class DriverDiagnosticTests(unittest.TestCase):
         report = query_driver_report(ReportController(), "tilt")
         self.assertEqual(report, (expected_status, expected_diagnostics))
         self.assertEqual(calls, [("status", "tilt"), ("diagnostics", "tilt")])
+
+
+class M4ParsingTests(unittest.TestCase):
+    TILT_STATE = (
+        "OK TILT ENABLED=1 DISABLING=0 MOVING=0 POS=50 VEL=0 TARGET=0 "
+        "TIMEOUT=0 HOMED=1 HOMING=0 HOME_STATUS=SUCCESS JOGGING=0 "
+        "DIR_CHECKING=0 DIR_CALIBRATED=1 MIN_LIMIT=0 "
+        "MAX_CONFIGURED=0 MAX_LIMIT=0"
+    )
+
+    def test_tilt_state_parser(self):
+        controller = SentryMcu.__new__(SentryMcu)
+        commands = []
+
+        def expect_ok(command):
+            commands.append(command)
+            return self.TILT_STATE
+
+        controller.expect_ok = expect_ok
+        parsed = controller.state("tilt")
+        self.assertIsInstance(parsed, AxisState)
+        self.assertEqual(commands, ["STATE? TILT"])
+        self.assertTrue(parsed.homed)
+        self.assertTrue(parsed.direction_calibrated)
+        self.assertEqual(parsed.position_steps, 50)
+
+    def test_endstop_parser_is_read_only_query(self):
+        controller = SentryMcu.__new__(SentryMcu)
+        commands = []
+
+        def expect_ok(command):
+            commands.append(command)
+            return "OK TILT ENDSTOP=1 RAW=0"
+
+        controller.expect_ok = expect_ok
+        parsed = controller.endstop()
+        self.assertIsInstance(parsed, EndstopState)
+        self.assertTrue(parsed.triggered)
+        self.assertFalse(parsed.raw_high)
+        self.assertEqual(commands, ["ENDSTOP? TILT"])
 
 
 if __name__ == "__main__":

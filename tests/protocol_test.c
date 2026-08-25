@@ -1,97 +1,177 @@
-#include "protocol.h"
+#include "board.h"
 #include "driver_control.h"
-#include "pan_controller.h"
+#include "motion_controller.h"
+#include "protocol.h"
 
 #include <stdbool.h>
-#include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
-#define CAPTURE_CAPACITY 2048U
+#define CAPTURE_CAPACITY 4096U
 
 typedef struct {
 	uint8_t bytes[CAPTURE_CAPACITY];
 	size_t length;
 } capture_t;
 
-static pan_controller_snapshot_t mock_snapshot;
-static pan_disable_result_t mock_disable_result;
-static pan_velocity_result_t mock_velocity_result;
-static int32_t mock_last_velocity;
-static pan_enable_result_t mock_enable_result;
+static motion_controller_snapshot_t mock_snapshots[2];
+static motion_enable_result_t mock_enable_results[2];
+static axis_disable_result_t mock_disable_results[2];
+static motion_velocity_result_t mock_velocity_results[2];
+static motion_dual_velocity_result_t mock_dual_result;
+static motion_home_result_t mock_home_result;
+static motion_jog_result_t mock_jog_result;
+static motion_direction_check_result_t mock_direction_result;
+static int32_t mock_last_velocities[2];
+static int32_t mock_last_jog;
+static bool mock_endstop_raw_high;
+static bool mock_endstop_triggered;
+static unsigned int mock_stop_calls;
+static unsigned int mock_fault_calls[2];
 static tmc2209_device_t mock_pan_driver;
 static tmc2209_device_t mock_tilt_driver;
 static bool mock_pan_configure_success;
 static bool mock_tilt_configure_success;
 static tmc_uart_diagnostics_t mock_uart_diagnostics;
-static unsigned int mock_refresh_calls;
-static unsigned int mock_configure_calls;
-static unsigned int mock_enable_calls;
 
 static void mock_reset(void)
 {
-	mock_snapshot.position_steps = 0;
-	mock_snapshot.current_velocity_steps_s = 0;
-	mock_snapshot.target_velocity_steps_s = 0;
-	mock_snapshot.enabled = false;
-	mock_snapshot.moving = false;
-	mock_snapshot.disabling = false;
-	mock_snapshot.motion_timeout = false;
-	mock_disable_result = PAN_DISABLE_COMPLETE;
-	mock_velocity_result = PAN_VELOCITY_OK;
-	mock_last_velocity = 0;
-	mock_enable_result = PAN_ENABLE_OK;
+	size_t index;
+
+	(void)memset(mock_snapshots, 0, sizeof(mock_snapshots));
+	for (index = 0U; index < 2U; ++index) {
+		mock_enable_results[index] = MOTION_ENABLE_OK;
+		mock_disable_results[index] = AXIS_DISABLE_COMPLETE;
+		mock_velocity_results[index] = MOTION_VELOCITY_OK;
+		mock_last_velocities[index] = 0;
+		mock_snapshots[index].home_status = TILT_HOME_STATUS_IDLE;
+	}
+	mock_dual_result.pan_result = MOTION_VELOCITY_OK;
+	mock_dual_result.tilt_result = MOTION_VELOCITY_OK;
+	mock_dual_result.applied = true;
+	mock_home_result = MOTION_HOME_OK;
+	mock_jog_result = MOTION_JOG_OK;
+	mock_direction_result = MOTION_DIRECTION_CHECK_OK;
+	mock_last_jog = 0;
+	mock_endstop_raw_high = true;
+	mock_endstop_triggered = false;
+	mock_stop_calls = 0U;
+	mock_fault_calls[0] = 0U;
+	mock_fault_calls[1] = 0U;
 	mock_pan_configure_success = true;
 	mock_tilt_configure_success = true;
 	tmc_uart_diagnostics_init(&mock_uart_diagnostics);
-	mock_refresh_calls = 0U;
-	mock_configure_calls = 0U;
-	mock_enable_calls = 0U;
 	tmc2209_device_init(&mock_pan_driver, 2U,
 			 &(tmc2209_transport_t){NULL, NULL, NULL, NULL});
 	tmc2209_device_init(&mock_tilt_driver, 1U,
 			 &(tmc2209_transport_t){NULL, NULL, NULL, NULL});
 	mock_pan_driver.state = TMC2209_STATE_PRESENT;
+	mock_tilt_driver.state = TMC2209_STATE_PRESENT;
 	mock_pan_driver.ioin = (uint32_t)TMC2209_EXPECTED_VERSION <<
 			       TMC2209_IOIN_VERSION_SHIFT;
-	mock_tilt_driver.state = TMC2209_STATE_PRESENT;
 	mock_tilt_driver.ioin = (uint32_t)TMC2209_EXPECTED_VERSION <<
 				TMC2209_IOIN_VERSION_SHIFT;
 }
 
-void pan_controller_init(void)
+void motion_controller_init(void)
 {
 }
 
-pan_enable_result_t pan_controller_enable(void)
+motion_enable_result_t motion_controller_enable(motion_axis_t axis)
 {
-	++mock_enable_calls;
-	if (mock_enable_result == PAN_ENABLE_OK) {
-		mock_snapshot.enabled = true;
+	if (mock_enable_results[axis] == MOTION_ENABLE_OK) {
+		mock_snapshots[axis].enabled = true;
 	}
-	return mock_enable_result;
+	return mock_enable_results[axis];
 }
 
-pan_disable_result_t pan_controller_disable(void)
+axis_disable_result_t motion_controller_disable(motion_axis_t axis)
 {
-	return mock_disable_result;
+	if (mock_disable_results[axis] == AXIS_DISABLE_COMPLETE) {
+		mock_snapshots[axis].enabled = false;
+	}
+	return mock_disable_results[axis];
 }
 
-pan_velocity_result_t pan_controller_set_velocity(int32_t velocity_steps_s)
+motion_velocity_result_t motion_controller_set_velocity(
+	motion_axis_t axis, int32_t velocity_steps_s)
 {
-	mock_last_velocity = velocity_steps_s;
-	return mock_velocity_result;
+	mock_last_velocities[axis] = velocity_steps_s;
+	return mock_velocity_results[axis];
 }
 
-void pan_controller_stop(void)
+motion_dual_velocity_result_t motion_controller_set_both_velocities(
+	int32_t pan_velocity_steps_s, int32_t tilt_velocity_steps_s)
 {
-	mock_snapshot.target_velocity_steps_s = 0;
+	if (mock_dual_result.applied) {
+		mock_last_velocities[MOTION_AXIS_PAN] = pan_velocity_steps_s;
+		mock_last_velocities[MOTION_AXIS_TILT] = tilt_velocity_steps_s;
+	}
+	return mock_dual_result;
 }
 
-void pan_controller_get_snapshot(pan_controller_snapshot_t *snapshot)
+void motion_controller_stop_all(void)
 {
-	*snapshot = mock_snapshot;
+	++mock_stop_calls;
+	mock_snapshots[MOTION_AXIS_PAN].target_velocity_steps_s = 0;
+	mock_snapshots[MOTION_AXIS_TILT].target_velocity_steps_s = 0;
+}
+
+motion_home_result_t motion_controller_home_tilt(void)
+{
+	return mock_home_result;
+}
+
+motion_jog_result_t motion_controller_jog_tilt(int32_t steps)
+{
+	mock_last_jog = steps;
+	return mock_jog_result;
+}
+
+motion_direction_check_result_t motion_controller_direction_check_tilt(
+	bool direction_high)
+{
+	(void)direction_high;
+	return mock_direction_result;
+}
+
+void motion_controller_get_snapshot(motion_axis_t axis,
+				    motion_controller_snapshot_t *snapshot)
+{
+	*snapshot = mock_snapshots[axis];
+}
+
+bool motion_controller_axis_inactive(motion_axis_t axis)
+{
+	const motion_controller_snapshot_t *snapshot = &mock_snapshots[axis];
+
+	return !snapshot->enabled && !snapshot->moving &&
+	       !snapshot->disabling && !snapshot->homing && !snapshot->jogging &&
+	       !snapshot->direction_checking;
+}
+
+void motion_controller_driver_fault(motion_axis_t axis)
+{
+	++mock_fault_calls[axis];
+	mock_snapshots[axis].enabled = false;
+}
+
+const char *tilt_home_status_name(tilt_home_status_t status)
+{
+	return status == TILT_HOME_STATUS_SUCCESS ? "SUCCESS" :
+	       status == TILT_HOME_STATUS_RUNNING ? "RUNNING" : "IDLE";
+}
+
+bool board_tilt_endstop_raw_high(void)
+{
+	return mock_endstop_raw_high;
+}
+
+bool board_tilt_endstop_triggered(void)
+{
+	return mock_endstop_triggered;
 }
 
 void driver_control_init(void)
@@ -103,7 +183,6 @@ driver_configure_result_t driver_control_configure(void)
 	driver_configure_result_t result = {mock_pan_configure_success,
 					    mock_tilt_configure_success};
 
-	++mock_configure_calls;
 	mock_pan_driver.state = mock_pan_configure_success ?
 		TMC2209_STATE_CONFIGURED : TMC2209_STATE_ERROR;
 	mock_pan_driver.configuration_valid = mock_pan_configure_success;
@@ -121,7 +200,6 @@ driver_configure_result_t driver_control_configure(void)
 void driver_control_refresh(driver_axis_t axis)
 {
 	(void)axis;
-	++mock_refresh_calls;
 }
 
 const tmc2209_device_t *driver_control_get(driver_axis_t axis)
@@ -129,12 +207,13 @@ const tmc2209_device_t *driver_control_get(driver_axis_t axis)
 	return axis == DRIVER_AXIS_PAN ? &mock_pan_driver : &mock_tilt_driver;
 }
 
-bool driver_control_pan_ready(void)
+bool driver_control_ready(driver_axis_t axis)
 {
-	return (mock_pan_driver.state == TMC2209_STATE_CONFIGURED) &&
-	       mock_pan_driver.configuration_valid &&
-	       (mock_pan_driver.error == TMC2209_ERROR_NONE) &&
-	       !mock_pan_driver.fatal;
+	const tmc2209_device_t *device = driver_control_get(axis);
+
+	return device->state == TMC2209_STATE_CONFIGURED &&
+	       device->configuration_valid && device->error == TMC2209_ERROR_NONE &&
+	       !device->fatal;
 }
 
 void driver_control_get_uart_diagnostics(tmc_uart_diagnostics_t *diagnostics)
@@ -145,395 +224,186 @@ void driver_control_get_uart_diagnostics(tmc_uart_diagnostics_t *diagnostics)
 static bool capture_write(const uint8_t *data, size_t length, void *context)
 {
 	capture_t *capture = context;
-	size_t index;
 
 	if (length > (CAPTURE_CAPACITY - capture->length)) {
 		return false;
 	}
-
-	for (index = 0U; index < length; ++index) {
-		capture->bytes[capture->length + index] = data[index];
-	}
+	(void)memcpy(&capture->bytes[capture->length], data, length);
 	capture->length += length;
 	return true;
 }
 
-static bool bytes_equal(const uint8_t *actual, size_t actual_length,
-			const char *expected, size_t expected_length)
+static int check_capture(const char *name, const capture_t *capture,
+			 const char *expected)
 {
+	const size_t expected_length = strlen(expected);
+
+	if ((capture->length != expected_length) ||
+	    (memcmp(capture->bytes, expected, expected_length) != 0)) {
+		(void)fprintf(stderr, "FAIL: %s\nexpected: %s\n", name, expected);
+		return 1;
+	}
+	return 0;
+}
+
+static int run_case(const char *name, const char *commands,
+		    const char *expected)
+{
+	protocol_t protocol;
+	capture_t capture = {{0U}, 0U};
+
+	mock_reset();
+	protocol_init(&protocol, capture_write, &capture);
+	protocol_receive(&protocol, (const uint8_t *)commands, strlen(commands));
+	return check_capture(name, &capture, expected);
+}
+
+static int test_basic_and_compatibility(void)
+{
+	return run_case(
+		"basic and PAN state compatibility",
+		"PING\nINFO\nSTATE?\nSTATE? PAN\n",
+		"OK PONG\r\n"
+		"OK SENTRY-MCU 0.4.0 SKR_MINI_E3_V2\r\n"
+		"OK PAN ENABLED=0 DISABLING=0 MOVING=0 POS=0 VEL=0 "
+		"TARGET=0 TIMEOUT=0\r\n"
+		"OK PAN ENABLED=0 DISABLING=0 MOVING=0 POS=0 VEL=0 "
+		"TARGET=0 TIMEOUT=0\r\n");
+}
+
+static int test_axis_commands(void)
+{
+	return run_case(
+		"two-axis motion commands",
+		"ENABLE PAN\nENABLE TILT\nVEL PAN 200\nVEL TILT -50\n"
+		"VEL BOTH 300 100\nSTOP\nDISABLE PAN\nDISABLE TILT\n",
+		"OK PAN ENABLED\r\nOK TILT ENABLED\r\nOK\r\nOK\r\nOK\r\n"
+		"OK\r\nOK PAN DISABLED\r\nOK TILT DISABLED\r\n");
+}
+
+static int test_tilt_state_and_commissioning(void)
+{
+	protocol_t protocol;
+	capture_t capture = {{0U}, 0U};
+	static const char commands[] =
+		"STATE? TILT\nENDSTOP? TILT\nHOME TILT\nJOG TILT +50\n"
+		"DIR-CHECK TILT HIGH\n";
+	static const char expected[] =
+		"OK TILT ENABLED=1 DISABLING=0 MOVING=0 POS=123 VEL=0 "
+		"TARGET=0 TIMEOUT=0 HOMED=1 HOMING=0 HOME_STATUS=SUCCESS "
+		"JOGGING=0 DIR_CHECKING=0 DIR_CALIBRATED=0 MIN_LIMIT=0 "
+		"MAX_CONFIGURED=0 MAX_LIMIT=0\r\n"
+		"OK TILT ENDSTOP=0 RAW=1\r\n"
+		"OK TILT HOMING\r\nOK TILT JOGGING\r\n"
+		"OK TILT DIR_CHECKING\r\n";
+
+	mock_reset();
+	mock_snapshots[MOTION_AXIS_TILT].enabled = true;
+	mock_snapshots[MOTION_AXIS_TILT].position_steps = 123;
+	mock_snapshots[MOTION_AXIS_TILT].homed = true;
+	mock_snapshots[MOTION_AXIS_TILT].home_status =
+		TILT_HOME_STATUS_SUCCESS;
+	protocol_init(&protocol, capture_write, &capture);
+	protocol_receive(&protocol, (const uint8_t *)commands,
+			 strlen(commands));
+	return check_capture("TILT status and commissioning", &capture, expected);
+}
+
+static int test_atomic_error_and_axis_errors(void)
+{
+	protocol_t protocol;
+	capture_t capture = {{0U}, 0U};
+	int failures = 0;
+
+	mock_reset();
+	mock_dual_result.applied = false;
+	mock_dual_result.tilt_result = MOTION_VELOCITY_NOT_HOMED;
+	protocol_init(&protocol, capture_write, &capture);
+	protocol_receive(&protocol, (const uint8_t *)"VEL BOTH 300 200\n", 17U);
+	failures += check_capture("dual all-or-none error", &capture,
+				  "ERR TILT_NOT_HOMED\r\n");
+	if ((mock_last_velocities[0] != 0) || (mock_last_velocities[1] != 0)) {
+		(void)fprintf(stderr, "FAIL: rejected dual update mutated a target\n");
+		++failures;
+	}
+
+	mock_reset();
+	mock_velocity_results[MOTION_AXIS_TILT] =
+		MOTION_VELOCITY_DIRECTION_UNCALIBRATED;
+	capture.length = 0U;
+	protocol_init(&protocol, capture_write, &capture);
+	protocol_receive(&protocol, (const uint8_t *)"VEL TILT 1\n", 11U);
+	failures += check_capture("uncalibrated velocity", &capture,
+				  "ERR TILT_DIR_UNCALIBRATED\r\n");
+	return failures;
+}
+
+static int test_driver_independence_and_config_gate(void)
+{
+	protocol_t protocol;
+	capture_t capture = {{0U}, 0U};
+	int failures = 0;
+
+	mock_reset();
+	mock_pan_driver.state = TMC2209_STATE_CONFIGURED;
+	mock_pan_driver.configuration_valid = true;
+	mock_pan_driver.fatal = true;
+	mock_snapshots[MOTION_AXIS_PAN].enabled = true;
+	protocol_init(&protocol, capture_write, &capture);
+	protocol_receive(&protocol, (const uint8_t *)"DRIVER? PAN\n", 12U);
+	if ((mock_fault_calls[MOTION_AXIS_PAN] != 1U) ||
+	    (mock_fault_calls[MOTION_AXIS_TILT] != 0U)) {
+		(void)fprintf(stderr, "FAIL: fatal PAN did not remain axis-local\n");
+		++failures;
+	}
+
+	mock_reset();
+	mock_snapshots[MOTION_AXIS_TILT].enabled = true;
+	capture.length = 0U;
+	protocol_init(&protocol, capture_write, &capture);
+	protocol_receive(&protocol, (const uint8_t *)"DRIVER CONFIGURE\n", 17U);
+	failures += check_capture("configure gate includes TILT", &capture,
+				  "ERR TILT_ENABLED\r\n");
+	return failures;
+}
+
+static int test_bounded_parser(void)
+{
+	char oversized[PROTOCOL_LINE_CAPACITY + 3U];
+	protocol_t protocol;
+	capture_t capture = {{0U}, 0U};
 	size_t index;
-
-	if (actual_length != expected_length) {
-		return false;
-	}
-	for (index = 0U; index < expected_length; ++index) {
-		if (actual[index] != (uint8_t)expected[index]) {
-			return false;
-		}
-	}
-	return true;
-}
-
-static int check_case(const char *name, const uint8_t *input, size_t input_length,
-		      const char *expected, size_t expected_length)
-{
-	protocol_t protocol;
-	capture_t capture = {{0U}, 0U};
-
-	mock_reset();
-	protocol_init(&protocol, capture_write, &capture);
-	protocol_receive(&protocol, input, input_length);
-	if (!bytes_equal(capture.bytes, capture.length, expected, expected_length)) {
-		(void)fprintf(stderr, "FAIL: %s\n", name);
-		return 1;
-	}
-	return 0;
-}
-
-static int check_fragmented(void)
-{
-	static const uint8_t first[] = "PI";
-	static const uint8_t second[] = "NG\r";
-	static const char expected[] = "OK PONG\r\n";
-	protocol_t protocol;
-	capture_t capture = {{0U}, 0U};
-
-	mock_reset();
-	protocol_init(&protocol, capture_write, &capture);
-	protocol_receive(&protocol, first, sizeof(first) - 1U);
-	protocol_receive(&protocol, second, sizeof(second) - 1U);
-	if (!bytes_equal(capture.bytes, capture.length, expected,
-			 sizeof(expected) - 1U)) {
-		(void)fprintf(stderr, "FAIL: fragmented input\n");
-		return 1;
-	}
-	return 0;
-}
-
-static int check_motion_commands(void)
-{
-	static const uint8_t commands[] =
-		"ENABLE PAN\nVEL PAN +200\nSTOP\nDISABLE PAN\nSTATE?\n";
-	static const char expected[] =
-		"OK PAN ENABLED\r\n"
-		"OK\r\n"
-		"OK\r\n"
-		"OK PAN DISABLED\r\n"
-		"OK PAN ENABLED=1 DISABLING=0 MOVING=0 POS=0 VEL=0 TARGET=0 TIMEOUT=0\r\n";
-	protocol_t protocol;
-	capture_t capture = {{0U}, 0U};
-
-	mock_reset();
-	protocol_init(&protocol, capture_write, &capture);
-	protocol_receive(&protocol, commands, sizeof(commands) - 1U);
-	if (!bytes_equal(capture.bytes, capture.length, expected,
-			 sizeof(expected) - 1U) ||
-	    (mock_last_velocity != 200)) {
-		(void)fprintf(stderr, "FAIL: motion commands\n");
-		return 1;
-	}
-	return 0;
-}
-
-static int check_velocity_errors(void)
-{
-	static const uint8_t commands[] =
-		"VEL PAN 2147483648\n"
-		"VEL PAN -2147483649\n"
-		"VEL PAN +\n"
-		"VEL TILT 1\n"
-		"VEL PAN 1001\n"
-		"VEL PAN -1001\n";
-	static const char expected[] =
-		"ERR BAD_ARGUMENT\r\n"
-		"ERR BAD_ARGUMENT\r\n"
-		"ERR BAD_ARGUMENT\r\n"
-		"ERR BAD_ARGUMENT\r\n"
-		"ERR VELOCITY_RANGE\r\n"
-		"ERR VELOCITY_RANGE\r\n";
 	int failures;
 
-	failures = check_case("velocity errors", commands, sizeof(commands) - 1U,
-			      expected, sizeof(expected) - 1U);
-	return failures;
-}
-
-static int check_velocity_state_errors(void)
-{
-	static const uint8_t velocity[] = "VEL PAN 100\n";
-	static const char disabled[] = "ERR PAN_DISABLED\r\n";
-	static const char disabling[] = "ERR PAN_DISABLING\r\n";
-	protocol_t protocol;
-	capture_t capture = {{0U}, 0U};
-	int failures = 0;
-
+	for (index = 0U; index < sizeof(oversized) - 1U; ++index) {
+		oversized[index] = 'X';
+	}
+	oversized[sizeof(oversized) - 1U] = '\n';
 	mock_reset();
-	mock_velocity_result = PAN_VELOCITY_DISABLED;
 	protocol_init(&protocol, capture_write, &capture);
-	protocol_receive(&protocol, velocity, sizeof(velocity) - 1U);
-	if (!bytes_equal(capture.bytes, capture.length, disabled,
-			 sizeof(disabled) - 1U)) {
-		(void)fprintf(stderr, "FAIL: disabled velocity\n");
-		++failures;
-	}
-
-	capture.length = 0U;
-	mock_velocity_result = PAN_VELOCITY_DISABLING;
-	protocol_receive(&protocol, velocity, sizeof(velocity) - 1U);
-	if (!bytes_equal(capture.bytes, capture.length, disabling,
-			 sizeof(disabling) - 1U)) {
-		(void)fprintf(stderr, "FAIL: disabling velocity\n");
-		++failures;
-	}
-	return failures;
-}
-
-static int check_pending_disable(void)
-{
-	static const uint8_t command[] = "DISABLE PAN\n";
-	static const char expected[] = "OK PAN DISABLING\r\n";
-	protocol_t protocol;
-	capture_t capture = {{0U}, 0U};
-
-	mock_reset();
-	mock_disable_result = PAN_DISABLE_PENDING;
-	protocol_init(&protocol, capture_write, &capture);
-	protocol_receive(&protocol, command, sizeof(command) - 1U);
-	if (!bytes_equal(capture.bytes, capture.length, expected,
-			 sizeof(expected) - 1U)) {
-		(void)fprintf(stderr, "FAIL: pending disable\n");
-		return 1;
-	}
-	return 0;
-}
-
-static int check_driver_commands(void)
-{
-	static const uint8_t commands[] =
-		"DRIVER? PAN\nDRIVER CONFIGURE\nDRIVER? TILT\n";
-	static const char expected[] =
-		"OK DRIVER PAN ADDR=2 PRESENT=1 CONFIGURED=0 ERR=NONE IFCNT=0 "
-		"IOIN=0x21000000 GSTAT=0x00000000 DRV=0x00000000 RUN_MA=0 "
-		"HOLD_MA=0 MSTEP=0 INTPOL=0 MODE=UNCONFIGURED OTPW=0 STST=0 "
-		"STEALTH=0 FATAL=0\r\n"
-		"OK DRIVERS PAN=CONFIGURED TILT=CONFIGURED\r\n"
-		"OK DRIVER TILT ADDR=1 PRESENT=1 CONFIGURED=1 ERR=NONE IFCNT=0 "
-		"IOIN=0x21000000 GSTAT=0x00000000 DRV=0x00000000 RUN_MA=0 "
-		"HOLD_MA=0 MSTEP=0 INTPOL=0 MODE=UNCONFIGURED OTPW=0 STST=0 "
-		"STEALTH=0 FATAL=0\r\n";
-
-	return check_case("driver commands", commands, sizeof(commands) - 1U,
-			  expected, sizeof(expected) - 1U);
-}
-
-static int check_driver_diagnostics(void)
-{
-	static const uint8_t command[] = "DRIVER-DIAG? TILT\n";
-	static const char expected[] =
-		"OK DRIVER_DIAG TILT ADDR=1 UART_ORE=4294967295 "
-		"UART_NE=4294967295 UART_FE=4294967295 UART_PE=4294967295 "
-		"UART_LAST_ADDR=1 UART_LAST_OP=WRITE UART_LAST_REG=0x70 "
-		"UART_FLAGS=0x0F UART_RETRIES=4294967295 LAST_OP=READ "
-		"LAST_REG=0x06 LAST_ATTEMPT=3 TRANSPORT=UART PARSER=CRC "
-		"LAST_CFG_STAGE=CONFIG_STATUS_REFRESH LAST_CFG_REG=0x6F "
-		"LAST_CFG_PHASE=READ LAST_CFG_ERR=UART\r\n";
-	protocol_t protocol;
-	capture_t capture = {{0U}, 0U};
-
-	mock_reset();
-	mock_uart_diagnostics.overrun_count = UINT32_MAX;
-	mock_uart_diagnostics.noise_count = UINT32_MAX;
-	mock_uart_diagnostics.framing_count = UINT32_MAX;
-	mock_uart_diagnostics.parity_count = UINT32_MAX;
-	mock_uart_diagnostics.last_valid = true;
-	mock_uart_diagnostics.last_address = 1U;
-	mock_uart_diagnostics.last_operation = TMC2209_OPERATION_WRITE;
-	mock_uart_diagnostics.last_register = TMC2209_REGISTER_PWMCONF;
-	mock_uart_diagnostics.last_flags = 0x0FU;
-	mock_tilt_driver.diagnostics.retry_count = UINT32_MAX;
-	mock_tilt_driver.diagnostics.last_operation = TMC2209_OPERATION_READ;
-	mock_tilt_driver.diagnostics.last_register = TMC2209_REGISTER_IOIN;
-	mock_tilt_driver.diagnostics.last_attempt = 3U;
-	mock_tilt_driver.diagnostics.last_transport_error = TMC2209_ERROR_UART;
-	mock_tilt_driver.diagnostics.last_parser_error = TMC2209_ERROR_CRC;
-	mock_tilt_driver.diagnostics.last_configuration_stage =
-		TMC2209_FAILURE_STAGE_CONFIG_STATUS_REFRESH;
-	mock_tilt_driver.diagnostics.last_configuration_register =
-		TMC2209_REGISTER_DRV_STATUS;
-	mock_tilt_driver.diagnostics.last_configuration_phase =
-		TMC2209_FAILURE_PHASE_READ;
-	mock_tilt_driver.diagnostics.last_configuration_error =
-		TMC2209_ERROR_UART;
-	protocol_init(&protocol, capture_write, &capture);
-	protocol_receive(&protocol, command, sizeof(command) - 1U);
-	if (!bytes_equal(capture.bytes, capture.length, expected,
-			 sizeof(expected) - 1U) ||
-	    (capture.length > PROTOCOL_MAX_RESPONSE_SIZE) ||
-	    (mock_refresh_calls != 0U) || (mock_configure_calls != 0U) ||
-	    (mock_enable_calls != 0U)) {
-		(void)fprintf(stderr, "FAIL: bounded read-only driver diagnostics\n");
-		return 1;
-	}
-	return 0;
-}
-
-static int check_driver_enable_gate(void)
-{
-	static const uint8_t command[] = "ENABLE PAN\n";
-	static const char expected[] = "ERR PAN_DRIVER_NOT_READY\r\n";
-	protocol_t protocol;
-	capture_t capture = {{0U}, 0U};
-
-	mock_reset();
-	mock_enable_result = PAN_ENABLE_DRIVER_NOT_READY;
-	protocol_init(&protocol, capture_write, &capture);
-	protocol_receive(&protocol, command, sizeof(command) - 1U);
-	if (!bytes_equal(capture.bytes, capture.length, expected,
-			 sizeof(expected) - 1U)) {
-		(void)fprintf(stderr, "FAIL: driver enable gate\n");
-		return 1;
-	}
-	return 0;
-}
-
-static int check_driver_configure_guards(void)
-{
-	static const uint8_t command[] = "DRIVER CONFIGURE\n";
-	static const char enabled_expected[] = "ERR PAN_ENABLED\r\n";
-	static const char partial_expected[] =
-		"ERR DRIVER_CONFIG PAN=CONFIGURED TILT=ERROR\r\n";
-	protocol_t protocol;
-	capture_t capture = {{0U}, 0U};
-	int failures = 0;
-
-	mock_reset();
-	mock_snapshot.enabled = true;
-	protocol_init(&protocol, capture_write, &capture);
-	protocol_receive(&protocol, command, sizeof(command) - 1U);
-	if (!bytes_equal(capture.bytes, capture.length, enabled_expected,
-			 sizeof(enabled_expected) - 1U)) {
-		(void)fprintf(stderr, "FAIL: configure while PAN enabled\n");
-		++failures;
-	}
-
-	mock_reset();
-	mock_tilt_configure_success = false;
-	capture.length = 0U;
-	protocol_init(&protocol, capture_write, &capture);
-	protocol_receive(&protocol, command, sizeof(command) - 1U);
-	if (!bytes_equal(capture.bytes, capture.length, partial_expected,
-			 sizeof(partial_expected) - 1U)) {
-		(void)fprintf(stderr, "FAIL: partial driver configuration\n");
-		++failures;
-	}
-	return failures;
-}
-
-static int check_state_extremes(void)
-{
-	static const uint8_t command[] = "STATE?\n";
-	static const char expected[] =
-		"OK PAN ENABLED=1 DISABLING=1 MOVING=1 POS=-9223372036854775808 "
-		"VEL=-1000 TARGET=1000 TIMEOUT=1\r\n";
-	protocol_t protocol;
-	capture_t capture = {{0U}, 0U};
-
-	mock_reset();
-	mock_snapshot.position_steps = INT64_MIN;
-	mock_snapshot.current_velocity_steps_s = -1000;
-	mock_snapshot.target_velocity_steps_s = 1000;
-	mock_snapshot.enabled = true;
-	mock_snapshot.moving = true;
-	mock_snapshot.disabling = true;
-	mock_snapshot.motion_timeout = true;
-	protocol_init(&protocol, capture_write, &capture);
-	protocol_receive(&protocol, command, sizeof(command) - 1U);
-	if (!bytes_equal(capture.bytes, capture.length, expected,
-			 sizeof(expected) - 1U)) {
-		(void)fprintf(stderr, "FAIL: state extremes\n");
-		return 1;
-	}
-	return 0;
-}
-
-static int check_boundaries(void)
-{
-	uint8_t exact[PROTOCOL_LINE_CAPACITY];
-	uint8_t oversized[PROTOCOL_LINE_CAPACITY + 1U];
-	size_t index;
-	int failures = 0;
-	static const char unknown[] = "ERR UNKNOWN_COMMAND\r\n";
-	static const char too_long[] = "ERR COMMAND_TOO_LONG\r\n";
-
-	for (index = 0U; index < (PROTOCOL_LINE_CAPACITY - 1U); ++index) {
-		exact[index] = (uint8_t)'A';
-	}
-	exact[PROTOCOL_LINE_CAPACITY - 1U] = (uint8_t)'\n';
-
-	for (index = 0U; index < PROTOCOL_LINE_CAPACITY; ++index) {
-		oversized[index] = (uint8_t)'A';
-	}
-	oversized[PROTOCOL_LINE_CAPACITY] = (uint8_t)'\n';
-
-	failures += check_case("63-byte command", exact, sizeof(exact), unknown,
-			       sizeof(unknown) - 1U);
-	failures += check_case("64-byte command", oversized, sizeof(oversized),
-			       too_long, sizeof(too_long) - 1U);
+	protocol_receive(&protocol, (const uint8_t *)oversized,
+			 sizeof(oversized));
+	failures = check_capture("bounded oversized input", &capture,
+				 "ERR COMMAND_TOO_LONG\r\n");
+	failures += run_case("malformed commands",
+			     "\nVEL BOTH 1 nope\nENDSTOP? PAN\nHOME PAN\n",
+			     "ERR EMPTY_COMMAND\r\nERR BAD_ARGUMENT\r\n"
+			     "ERR BAD_ARGUMENT\r\nERR BAD_ARGUMENT\r\n");
 	return failures;
 }
 
 int main(void)
 {
-	static const uint8_t line_endings[] = "PING\rINFO\nPING\r\n";
-	static const char line_endings_expected[] =
-		"OK PONG\r\n"
-		"OK SENTRY-MCU 0.3.0 SKR_MINI_E3_V2\r\n"
-		"OK PONG\r\n";
-	static const uint8_t whitespace[] = " \tPING\t \n";
-	static const char pong[] = "OK PONG\r\n";
-	static const uint8_t empty[] = "\n";
-	static const char empty_response[] = "ERR EMPTY_COMMAND\r\n";
-	static const uint8_t unknown[] = "ping\nWAT 1\r\n";
-	static const char unknown_response[] =
-		"ERR UNKNOWN_COMMAND\r\nERR UNKNOWN_COMMAND\r\n";
-	static const uint8_t recovered[] =
-		"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nPING\n";
-	static const char recovered_response[] =
-		"ERR COMMAND_TOO_LONG\r\nOK PONG\r\n";
-	static const uint8_t bad_diagnostics[] = "DRIVER-DIAG? ALL\n";
-	static const char bad_argument[] = "ERR BAD_ARGUMENT\r\n";
 	int failures = 0;
 
-	failures += check_case("CR LF CRLF", line_endings,
-			       sizeof(line_endings) - 1U, line_endings_expected,
-			       sizeof(line_endings_expected) - 1U);
-	failures += check_case("trim whitespace", whitespace,
-			       sizeof(whitespace) - 1U, pong, sizeof(pong) - 1U);
-	failures += check_case("empty", empty, sizeof(empty) - 1U,
-			       empty_response, sizeof(empty_response) - 1U);
-	failures += check_case("case and malformed", unknown,
-			       sizeof(unknown) - 1U, unknown_response,
-			       sizeof(unknown_response) - 1U);
-	failures += check_case("oversize recovery", recovered,
-			       sizeof(recovered) - 1U, recovered_response,
-			       sizeof(recovered_response) - 1U);
-	failures += check_case("bad driver diagnostics", bad_diagnostics,
-			       sizeof(bad_diagnostics) - 1U, bad_argument,
-			       sizeof(bad_argument) - 1U);
-	failures += check_fragmented();
-	failures += check_boundaries();
-	failures += check_motion_commands();
-	failures += check_velocity_errors();
-	failures += check_velocity_state_errors();
-	failures += check_pending_disable();
-	failures += check_state_extremes();
-	failures += check_driver_commands();
-	failures += check_driver_diagnostics();
-	failures += check_driver_enable_gate();
-	failures += check_driver_configure_guards();
-
+	failures += test_basic_and_compatibility();
+	failures += test_axis_commands();
+	failures += test_tilt_state_and_commissioning();
+	failures += test_atomic_error_and_axis_errors();
+	failures += test_driver_independence_and_config_gate();
+	failures += test_bounded_parser();
 	if (failures == 0) {
 		(void)puts("protocol tests passed");
 	}
-	return failures;
+	return failures == 0 ? 0 : 1;
 }

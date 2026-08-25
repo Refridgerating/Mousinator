@@ -20,6 +20,10 @@
 #define PAN_STEP_PIN BOARD_PAN_STEP_PIN_MASK
 #define PAN_DIRECTION_PIN BOARD_PAN_DIRECTION_PIN_MASK
 #define PAN_ENABLE_PIN BOARD_PAN_ENABLE_PIN_MASK
+#define TILT_STEP_PIN BOARD_TILT_STEP_PIN_MASK
+#define TILT_DIRECTION_PIN BOARD_TILT_DIRECTION_PIN_MASK
+#define TILT_ENABLE_PIN BOARD_TILT_ENABLE_PIN_MASK
+#define TILT_ENDSTOP_PIN BOARD_TILT_ENDSTOP_PIN_MASK
 
 #define SENTRY_AFIO_REMAPS \
 	(AFIO_MAPR_TIM2_REMAP_PARTIAL_REMAP2 | \
@@ -47,6 +51,7 @@ void board_safe_init(void)
 	gpio_set(GPIOD, MOTOR_ENABLE_GPIOD);
 	gpio_clear(GPIOB, MOTOR_STEP_GPIOB | MOTOR_DIR_GPIOB);
 	gpio_clear(GPIOC, MOTOR_DIR_GPIOC | UNUSED_POWER_GPIOC);
+	gpio_set(GPIOC, TILT_ENDSTOP_PIN);
 	gpio_set(USB_CONNECT_GPIO, USB_CONNECT_PIN);
 
 	gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL,
@@ -55,6 +60,8 @@ void board_safe_init(void)
 		      MOTOR_ENABLE_GPIOD);
 	gpio_set_mode(GPIOC, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL,
 		      MOTOR_DIR_GPIOC | UNUSED_POWER_GPIOC);
+	gpio_set_mode(GPIOC, GPIO_MODE_INPUT, GPIO_CNF_INPUT_PULL_UPDOWN,
+		      TILT_ENDSTOP_PIN);
 	gpio_set_mode(USB_CONNECT_GPIO, GPIO_MODE_OUTPUT_2_MHZ,
 		      GPIO_CNF_OUTPUT_PUSHPULL, USB_CONNECT_PIN);
 }
@@ -106,6 +113,52 @@ void board_pan_step_use_timer(void)
 			   SENTRY_AFIO_REMAPS);
 	gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_2_MHZ,
 		      GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, PAN_STEP_PIN);
+}
+
+void board_tilt_set_enabled(bool enabled)
+{
+	if (enabled) {
+		gpio_clear(GPIOB, TILT_ENABLE_PIN);
+	} else {
+		gpio_set(GPIOB, TILT_ENABLE_PIN);
+	}
+}
+
+void board_tilt_set_direction_raw(bool high)
+{
+	if (high) {
+		gpio_set(GPIOC, TILT_DIRECTION_PIN);
+	} else {
+		gpio_clear(GPIOC, TILT_DIRECTION_PIN);
+	}
+}
+
+void board_tilt_set_direction(bool positive)
+{
+	const bool positive_high = BOARD_TILT_POSITIVE_DIRECTION_HIGH != 0U;
+
+	board_tilt_set_direction_raw(positive ? positive_high : !positive_high);
+}
+
+void board_tilt_step_use_timer(void)
+{
+	/* TIM3_CH3 uses its default PB0 mapping; do not set a TIM3 remap. */
+	gpio_primary_remap(AFIO_MAPR_SWJ_CFG_JTAG_OFF_SW_OFF,
+			   SENTRY_AFIO_REMAPS);
+	gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_2_MHZ,
+		      GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, TILT_STEP_PIN);
+}
+
+bool board_tilt_endstop_raw_high(void)
+{
+	return gpio_get(GPIOC, TILT_ENDSTOP_PIN) != 0U;
+}
+
+bool board_tilt_endstop_triggered(void)
+{
+	const bool raw_high = board_tilt_endstop_raw_high();
+
+	return BOARD_TILT_ENDSTOP_ACTIVE_LOW != 0U ? !raw_high : raw_high;
 }
 
 void board_tmc_uart_use_usart(void)

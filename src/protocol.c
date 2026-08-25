@@ -1,7 +1,8 @@
 #include "protocol.h"
 
+#include "board.h"
 #include "driver_control.h"
-#include "pan_controller.h"
+#include "motion_controller.h"
 
 #include <limits.h>
 
@@ -24,20 +25,35 @@ typedef struct {
 static const uint8_t RESPONSE_OK[] = "OK\r\n";
 static const uint8_t RESPONSE_PONG[] = "OK PONG\r\n";
 static const uint8_t RESPONSE_INFO[] =
-	"OK SENTRY-MCU 0.3.0 SKR_MINI_E3_V2\r\n";
+	"OK SENTRY-MCU 0.4.0 SKR_MINI_E3_V2\r\n";
 static const uint8_t RESPONSE_PAN_ENABLED[] = "OK PAN ENABLED\r\n";
+static const uint8_t RESPONSE_TILT_ENABLED[] = "OK TILT ENABLED\r\n";
 static const uint8_t RESPONSE_PAN_DISABLED[] = "OK PAN DISABLED\r\n";
+static const uint8_t RESPONSE_TILT_DISABLED[] = "OK TILT DISABLED\r\n";
 static const uint8_t RESPONSE_PAN_DISABLING[] = "OK PAN DISABLING\r\n";
+static const uint8_t RESPONSE_TILT_DISABLING[] = "OK TILT DISABLING\r\n";
 static const uint8_t RESPONSE_EMPTY[] = "ERR EMPTY_COMMAND\r\n";
 static const uint8_t RESPONSE_UNKNOWN[] = "ERR UNKNOWN_COMMAND\r\n";
 static const uint8_t RESPONSE_TOO_LONG[] = "ERR COMMAND_TOO_LONG\r\n";
 static const uint8_t RESPONSE_BAD_ARGUMENT[] = "ERR BAD_ARGUMENT\r\n";
 static const uint8_t RESPONSE_VELOCITY_RANGE[] = "ERR VELOCITY_RANGE\r\n";
 static const uint8_t RESPONSE_PAN_DISABLED_ERROR[] = "ERR PAN_DISABLED\r\n";
+static const uint8_t RESPONSE_TILT_DISABLED_ERROR[] = "ERR TILT_DISABLED\r\n";
 static const uint8_t RESPONSE_PAN_DISABLING_ERROR[] = "ERR PAN_DISABLING\r\n";
+static const uint8_t RESPONSE_TILT_DISABLING_ERROR[] =
+	"ERR TILT_DISABLING\r\n";
 static const uint8_t RESPONSE_PAN_DRIVER_NOT_READY[] =
 	"ERR PAN_DRIVER_NOT_READY\r\n";
+static const uint8_t RESPONSE_TILT_DRIVER_NOT_READY[] =
+	"ERR TILT_DRIVER_NOT_READY\r\n";
 static const uint8_t RESPONSE_PAN_ENABLED_ERROR[] = "ERR PAN_ENABLED\r\n";
+static const uint8_t RESPONSE_TILT_ENABLED_ERROR[] = "ERR TILT_ENABLED\r\n";
+static const uint8_t RESPONSE_TILT_BUSY[] = "ERR TILT_BUSY\r\n";
+static const uint8_t RESPONSE_TILT_NOT_HOMED[] = "ERR TILT_NOT_HOMED\r\n";
+static const uint8_t RESPONSE_TILT_DIR_UNCALIBRATED[] =
+	"ERR TILT_DIR_UNCALIBRATED\r\n";
+static const uint8_t RESPONSE_TILT_MIN_LIMIT[] = "ERR TILT_MIN_LIMIT\r\n";
+static const uint8_t RESPONSE_JOG_RANGE[] = "ERR JOG_RANGE\r\n";
 
 STATIC_ASSERT(info_response_fits,
 	      (ARRAY_LENGTH(RESPONSE_INFO) - 1U) <= PROTOCOL_MAX_RESPONSE_SIZE);
@@ -218,13 +234,15 @@ static void protocol_emit(protocol_t *protocol, const uint8_t *response,
 	(void)protocol->write(response, response_length, protocol->write_context);
 }
 
-static void protocol_emit_state(protocol_t *protocol)
+static void protocol_emit_state(protocol_t *protocol, motion_axis_t axis)
 {
-	pan_controller_snapshot_t snapshot;
+	motion_controller_snapshot_t snapshot;
 	response_builder_t response = {{0U}, 0U, false};
+	const bool is_pan = axis == MOTION_AXIS_PAN;
 
-	pan_controller_get_snapshot(&snapshot);
-	response_append_text(&response, "OK PAN ENABLED=");
+	motion_controller_get_snapshot(axis, &snapshot);
+	response_append_text(&response, is_pan ? "OK PAN ENABLED=" :
+					      "OK TILT ENABLED=");
 	response_append_byte(&response, snapshot.enabled ? (uint8_t)'1' :
 							 (uint8_t)'0');
 	response_append_text(&response, " DISABLING=");
@@ -243,7 +261,34 @@ static void protocol_emit_state(protocol_t *protocol)
 			    (int64_t)snapshot.target_velocity_steps_s);
 	response_append_text(&response, " TIMEOUT=");
 	response_append_byte(&response, snapshot.motion_timeout ? (uint8_t)'1' :
-							       (uint8_t)'0');
+						       (uint8_t)'0');
+	if (!is_pan) {
+		response_append_text(&response, " HOMED=");
+		response_append_byte(&response,
+			snapshot.homed ? (uint8_t)'1' : (uint8_t)'0');
+		response_append_text(&response, " HOMING=");
+		response_append_byte(&response,
+			snapshot.homing ? (uint8_t)'1' : (uint8_t)'0');
+		response_append_text(&response, " HOME_STATUS=");
+		response_append_text(&response,
+			tilt_home_status_name(snapshot.home_status));
+		response_append_text(&response, " JOGGING=");
+		response_append_byte(&response,
+			snapshot.jogging ? (uint8_t)'1' : (uint8_t)'0');
+		response_append_text(&response, " DIR_CHECKING=");
+		response_append_byte(&response,
+			snapshot.direction_checking ? (uint8_t)'1' :
+						      (uint8_t)'0');
+		response_append_text(&response, " DIR_CALIBRATED=");
+		response_append_byte(&response,
+			snapshot.direction_calibrated ? (uint8_t)'1' :
+						       (uint8_t)'0');
+		response_append_text(&response, " MIN_LIMIT=");
+		response_append_byte(&response,
+			snapshot.min_limit ? (uint8_t)'1' : (uint8_t)'0');
+		response_append_text(&response,
+				     " MAX_CONFIGURED=0 MAX_LIMIT=0");
+	}
 	response_append_text(&response, "\r\n");
 
 	if (!response.overflow) {
@@ -254,20 +299,20 @@ static void protocol_emit_state(protocol_t *protocol)
 static void protocol_emit_driver(protocol_t *protocol, driver_axis_t axis)
 {
 	const tmc2209_device_t *device;
-	pan_controller_snapshot_t pan_snapshot;
+	motion_controller_snapshot_t snapshot;
 	response_builder_t response = {{0U}, 0U, false};
 	const bool is_pan = axis == DRIVER_AXIS_PAN;
 	bool present;
 
 	driver_control_refresh(axis);
 	device = driver_control_get(axis);
-	if (is_pan) {
-		if (device->fatal || (device->error == TMC2209_ERROR_RESET)) {
-			pan_controller_get_snapshot(&pan_snapshot);
-			if (pan_snapshot.enabled) {
-				pan_controller_stop();
-				(void)pan_controller_disable();
-			}
+	if (device->fatal || (device->error == TMC2209_ERROR_RESET)) {
+		const motion_axis_t motion_axis = is_pan ? MOTION_AXIS_PAN :
+							       MOTION_AXIS_TILT;
+
+		motion_controller_get_snapshot(motion_axis, &snapshot);
+		if (snapshot.enabled) {
+			motion_controller_driver_fault(motion_axis);
 		}
 	}
 	present = ((uint8_t)(device->ioin >> TMC2209_IOIN_VERSION_SHIFT) ==
@@ -406,16 +451,19 @@ static void protocol_emit_driver_diagnostics(protocol_t *protocol,
 
 static void protocol_handle_driver_configure(protocol_t *protocol)
 {
-	pan_controller_snapshot_t snapshot;
 	driver_configure_result_t result;
 	const tmc2209_device_t *pan;
 	const tmc2209_device_t *tilt;
 	response_builder_t response = {{0U}, 0U, false};
 
-	pan_controller_get_snapshot(&snapshot);
-	if (snapshot.enabled || snapshot.moving || snapshot.disabling) {
+	if (!motion_controller_axis_inactive(MOTION_AXIS_PAN)) {
 		protocol_emit(protocol, RESPONSE_PAN_ENABLED_ERROR,
 			      ARRAY_LENGTH(RESPONSE_PAN_ENABLED_ERROR) - 1U);
+		return;
+	}
+	if (!motion_controller_axis_inactive(MOTION_AXIS_TILT)) {
+		protocol_emit(protocol, RESPONSE_TILT_ENABLED_ERROR,
+			      ARRAY_LENGTH(RESPONSE_TILT_ENABLED_ERROR) - 1U);
 		return;
 	}
 	result = driver_control_configure();
@@ -435,45 +483,175 @@ static void protocol_handle_driver_configure(protocol_t *protocol)
 	}
 }
 
+static bool token_to_axis(token_t token, motion_axis_t *axis)
+{
+	if (token_equals(token, "PAN", 3U)) {
+		*axis = MOTION_AXIS_PAN;
+		return true;
+	}
+	if (token_equals(token, "TILT", 4U)) {
+		*axis = MOTION_AXIS_TILT;
+		return true;
+	}
+	return false;
+}
+
+static void protocol_emit_velocity_result(protocol_t *protocol,
+					  motion_axis_t axis,
+					  motion_velocity_result_t result)
+{
+	switch (result) {
+	case MOTION_VELOCITY_OK:
+		protocol_emit(protocol, RESPONSE_OK,
+			      ARRAY_LENGTH(RESPONSE_OK) - 1U);
+		break;
+	case MOTION_VELOCITY_RANGE:
+		protocol_emit(protocol, RESPONSE_VELOCITY_RANGE,
+			      ARRAY_LENGTH(RESPONSE_VELOCITY_RANGE) - 1U);
+		break;
+	case MOTION_VELOCITY_DISABLED:
+		protocol_emit(protocol,
+			      axis == MOTION_AXIS_PAN ?
+				      RESPONSE_PAN_DISABLED_ERROR :
+				      RESPONSE_TILT_DISABLED_ERROR,
+			      axis == MOTION_AXIS_PAN ?
+				      ARRAY_LENGTH(RESPONSE_PAN_DISABLED_ERROR) - 1U :
+				      ARRAY_LENGTH(RESPONSE_TILT_DISABLED_ERROR) - 1U);
+		break;
+	case MOTION_VELOCITY_DISABLING:
+		protocol_emit(protocol,
+			      axis == MOTION_AXIS_PAN ?
+				      RESPONSE_PAN_DISABLING_ERROR :
+				      RESPONSE_TILT_DISABLING_ERROR,
+			      axis == MOTION_AXIS_PAN ?
+				      ARRAY_LENGTH(RESPONSE_PAN_DISABLING_ERROR) - 1U :
+				      ARRAY_LENGTH(RESPONSE_TILT_DISABLING_ERROR) - 1U);
+		break;
+	case MOTION_VELOCITY_BUSY:
+		protocol_emit(protocol, RESPONSE_TILT_BUSY,
+			      ARRAY_LENGTH(RESPONSE_TILT_BUSY) - 1U);
+		break;
+	case MOTION_VELOCITY_DIRECTION_UNCALIBRATED:
+		protocol_emit(protocol, RESPONSE_TILT_DIR_UNCALIBRATED,
+			      ARRAY_LENGTH(RESPONSE_TILT_DIR_UNCALIBRATED) - 1U);
+		break;
+	case MOTION_VELOCITY_NOT_HOMED:
+		protocol_emit(protocol, RESPONSE_TILT_NOT_HOMED,
+			      ARRAY_LENGTH(RESPONSE_TILT_NOT_HOMED) - 1U);
+		break;
+	case MOTION_VELOCITY_MIN_LIMIT:
+		protocol_emit(protocol, RESPONSE_TILT_MIN_LIMIT,
+			      ARRAY_LENGTH(RESPONSE_TILT_MIN_LIMIT) - 1U);
+		break;
+	}
+}
+
 static void protocol_handle_velocity(protocol_t *protocol, token_t *tokens,
 				     size_t token_count)
 {
-	int32_t velocity;
-	pan_velocity_result_t result;
+	int32_t first_velocity;
+	int32_t second_velocity;
+	motion_axis_t axis;
 
-	if ((token_count != 3U) ||
-	    !token_equals(tokens[1], "PAN", 3U) ||
-	    !parse_int32(tokens[2], &velocity)) {
+	if ((token_count == 3U) && token_to_axis(tokens[1], &axis) &&
+	    parse_int32(tokens[2], &first_velocity)) {
+		protocol_emit_velocity_result(
+			protocol, axis,
+			motion_controller_set_velocity(axis, first_velocity));
+		return;
+	}
+	if ((token_count == 4U) && token_equals(tokens[1], "BOTH", 4U) &&
+	    parse_int32(tokens[2], &first_velocity) &&
+	    parse_int32(tokens[3], &second_velocity)) {
+		motion_dual_velocity_result_t result =
+			motion_controller_set_both_velocities(first_velocity,
+							      second_velocity);
+
+		if (result.applied) {
+			protocol_emit(protocol, RESPONSE_OK,
+				      ARRAY_LENGTH(RESPONSE_OK) - 1U);
+		} else if (result.pan_result != MOTION_VELOCITY_OK) {
+			protocol_emit_velocity_result(protocol, MOTION_AXIS_PAN,
+						      result.pan_result);
+		} else {
+			protocol_emit_velocity_result(protocol, MOTION_AXIS_TILT,
+						      result.tilt_result);
+		}
+		return;
+	}
+	protocol_emit(protocol, RESPONSE_BAD_ARGUMENT,
+		      ARRAY_LENGTH(RESPONSE_BAD_ARGUMENT) - 1U);
+}
+
+static void protocol_handle_enable(protocol_t *protocol, token_t axis_token)
+{
+	motion_axis_t axis;
+	motion_enable_result_t result;
+
+	if (!token_to_axis(axis_token, &axis)) {
 		protocol_emit(protocol, RESPONSE_BAD_ARGUMENT,
 			      ARRAY_LENGTH(RESPONSE_BAD_ARGUMENT) - 1U);
 		return;
 	}
-	if ((velocity > PAN_MAX_ABSOLUTE_VELOCITY_STEPS_S) ||
-	    (velocity < -PAN_MAX_ABSOLUTE_VELOCITY_STEPS_S)) {
-		protocol_emit(protocol, RESPONSE_VELOCITY_RANGE,
-			      ARRAY_LENGTH(RESPONSE_VELOCITY_RANGE) - 1U);
+	result = motion_controller_enable(axis);
+	if (result == MOTION_ENABLE_OK) {
+		protocol_emit(protocol,
+			      axis == MOTION_AXIS_PAN ? RESPONSE_PAN_ENABLED :
+							 RESPONSE_TILT_ENABLED,
+			      axis == MOTION_AXIS_PAN ?
+				      ARRAY_LENGTH(RESPONSE_PAN_ENABLED) - 1U :
+				      ARRAY_LENGTH(RESPONSE_TILT_ENABLED) - 1U);
+	} else {
+		protocol_emit(protocol,
+			      axis == MOTION_AXIS_PAN ?
+				      RESPONSE_PAN_DRIVER_NOT_READY :
+				      RESPONSE_TILT_DRIVER_NOT_READY,
+			      axis == MOTION_AXIS_PAN ?
+				      ARRAY_LENGTH(RESPONSE_PAN_DRIVER_NOT_READY) - 1U :
+				      ARRAY_LENGTH(RESPONSE_TILT_DRIVER_NOT_READY) - 1U);
+	}
+}
+
+static void protocol_handle_disable(protocol_t *protocol, token_t axis_token)
+{
+	motion_axis_t axis;
+	axis_disable_result_t result;
+
+	if (!token_to_axis(axis_token, &axis)) {
+		protocol_emit(protocol, RESPONSE_BAD_ARGUMENT,
+			      ARRAY_LENGTH(RESPONSE_BAD_ARGUMENT) - 1U);
 		return;
 	}
-
-	result = pan_controller_set_velocity(velocity);
-	switch (result) {
-	case PAN_VELOCITY_OK:
-		protocol_emit(protocol, RESPONSE_OK,
-			      ARRAY_LENGTH(RESPONSE_OK) - 1U);
-		break;
-	case PAN_VELOCITY_DISABLED:
-		protocol_emit(protocol, RESPONSE_PAN_DISABLED_ERROR,
-			      ARRAY_LENGTH(RESPONSE_PAN_DISABLED_ERROR) - 1U);
-		break;
-	case PAN_VELOCITY_DISABLING:
-		protocol_emit(protocol, RESPONSE_PAN_DISABLING_ERROR,
-			      ARRAY_LENGTH(RESPONSE_PAN_DISABLING_ERROR) - 1U);
-		break;
-	case PAN_VELOCITY_RANGE:
-		protocol_emit(protocol, RESPONSE_VELOCITY_RANGE,
-			      ARRAY_LENGTH(RESPONSE_VELOCITY_RANGE) - 1U);
-		break;
+	result = motion_controller_disable(axis);
+	if (result == AXIS_DISABLE_PENDING) {
+		protocol_emit(protocol,
+			      axis == MOTION_AXIS_PAN ? RESPONSE_PAN_DISABLING :
+							 RESPONSE_TILT_DISABLING,
+			      axis == MOTION_AXIS_PAN ?
+				      ARRAY_LENGTH(RESPONSE_PAN_DISABLING) - 1U :
+				      ARRAY_LENGTH(RESPONSE_TILT_DISABLING) - 1U);
+	} else {
+		protocol_emit(protocol,
+			      axis == MOTION_AXIS_PAN ? RESPONSE_PAN_DISABLED :
+							 RESPONSE_TILT_DISABLED,
+			      axis == MOTION_AXIS_PAN ?
+				      ARRAY_LENGTH(RESPONSE_PAN_DISABLED) - 1U :
+				      ARRAY_LENGTH(RESPONSE_TILT_DISABLED) - 1U);
 	}
+}
+
+static void protocol_emit_endstop(protocol_t *protocol)
+{
+	response_builder_t response = {{0U}, 0U, false};
+	const bool raw_high = board_tilt_endstop_raw_high();
+	const bool triggered = board_tilt_endstop_triggered();
+
+	response_append_text(&response, "OK TILT ENDSTOP=");
+	response_append_byte(&response, triggered ? (uint8_t)'1' : (uint8_t)'0');
+	response_append_text(&response, " RAW=");
+	response_append_byte(&response, raw_high ? (uint8_t)'1' : (uint8_t)'0');
+	response_append_text(&response, "\r\n");
+	protocol_emit(protocol, response.bytes, response.length);
 }
 
 static void protocol_dispatch(protocol_t *protocol, const char *command,
@@ -506,39 +684,24 @@ static void protocol_dispatch(protocol_t *protocol, const char *command,
 				      ARRAY_LENGTH(RESPONSE_BAD_ARGUMENT) - 1U);
 		}
 	} else if (token_equals(tokens[0], "ENABLE", 6U)) {
-		if ((token_count == 2U) &&
-		    token_equals(tokens[1], "PAN", 3U)) {
-			if (pan_controller_enable() == PAN_ENABLE_OK) {
-				protocol_emit(
-					protocol, RESPONSE_PAN_ENABLED,
-					ARRAY_LENGTH(RESPONSE_PAN_ENABLED) - 1U);
-			} else {
-				protocol_emit(
-					protocol, RESPONSE_PAN_DRIVER_NOT_READY,
-					ARRAY_LENGTH(RESPONSE_PAN_DRIVER_NOT_READY) -
-						1U);
-			}
+		if (token_count == 2U) {
+			protocol_handle_enable(protocol, tokens[1]);
 		} else {
 			protocol_emit(protocol, RESPONSE_BAD_ARGUMENT,
 				      ARRAY_LENGTH(RESPONSE_BAD_ARGUMENT) - 1U);
 		}
 	} else if (token_equals(tokens[0], "DISABLE", 7U)) {
-		if ((token_count != 2U) ||
-		    !token_equals(tokens[1], "PAN", 3U)) {
+		if (token_count != 2U) {
 			protocol_emit(protocol, RESPONSE_BAD_ARGUMENT,
 				      ARRAY_LENGTH(RESPONSE_BAD_ARGUMENT) - 1U);
-		} else if (pan_controller_disable() == PAN_DISABLE_PENDING) {
-			protocol_emit(protocol, RESPONSE_PAN_DISABLING,
-				      ARRAY_LENGTH(RESPONSE_PAN_DISABLING) - 1U);
 		} else {
-			protocol_emit(protocol, RESPONSE_PAN_DISABLED,
-				      ARRAY_LENGTH(RESPONSE_PAN_DISABLED) - 1U);
+			protocol_handle_disable(protocol, tokens[1]);
 		}
 	} else if (token_equals(tokens[0], "VEL", 3U)) {
 		protocol_handle_velocity(protocol, tokens, token_count);
 	} else if (token_equals(tokens[0], "STOP", 4U)) {
 		if (token_count == 1U) {
-			pan_controller_stop();
+			motion_controller_stop_all();
 			protocol_emit(protocol, RESPONSE_OK,
 				      ARRAY_LENGTH(RESPONSE_OK) - 1U);
 		} else {
@@ -547,7 +710,137 @@ static void protocol_dispatch(protocol_t *protocol, const char *command,
 		}
 	} else if (token_equals(tokens[0], "STATE?", 6U)) {
 		if (token_count == 1U) {
-			protocol_emit_state(protocol);
+			protocol_emit_state(protocol, MOTION_AXIS_PAN);
+		} else if ((token_count == 2U) &&
+			   token_equals(tokens[1], "PAN", 3U)) {
+			protocol_emit_state(protocol, MOTION_AXIS_PAN);
+		} else if ((token_count == 2U) &&
+			   token_equals(tokens[1], "TILT", 4U)) {
+			protocol_emit_state(protocol, MOTION_AXIS_TILT);
+		} else {
+			protocol_emit(protocol, RESPONSE_BAD_ARGUMENT,
+				      ARRAY_LENGTH(RESPONSE_BAD_ARGUMENT) - 1U);
+		}
+	} else if (token_equals(tokens[0], "ENDSTOP?", 8U)) {
+		if ((token_count == 2U) &&
+		    token_equals(tokens[1], "TILT", 4U)) {
+			protocol_emit_endstop(protocol);
+		} else {
+			protocol_emit(protocol, RESPONSE_BAD_ARGUMENT,
+				      ARRAY_LENGTH(RESPONSE_BAD_ARGUMENT) - 1U);
+		}
+	} else if (token_equals(tokens[0], "HOME", 4U)) {
+		if ((token_count == 2U) &&
+		    token_equals(tokens[1], "TILT", 4U)) {
+			switch (motion_controller_home_tilt()) {
+			case MOTION_HOME_OK: {
+				static const uint8_t response[] =
+					"OK TILT HOMING\r\n";
+				protocol_emit(protocol, response,
+					      ARRAY_LENGTH(response) - 1U);
+				break;
+			}
+			case MOTION_HOME_DRIVER_NOT_READY:
+				protocol_emit(protocol,
+					      RESPONSE_TILT_DRIVER_NOT_READY,
+					      ARRAY_LENGTH(
+						      RESPONSE_TILT_DRIVER_NOT_READY) -
+						      1U);
+				break;
+			case MOTION_HOME_DIRECTION_UNCALIBRATED:
+				protocol_emit(protocol,
+					      RESPONSE_TILT_DIR_UNCALIBRATED,
+					      ARRAY_LENGTH(
+						      RESPONSE_TILT_DIR_UNCALIBRATED) -
+						      1U);
+				break;
+			case MOTION_HOME_BUSY:
+				protocol_emit(protocol, RESPONSE_TILT_BUSY,
+					      ARRAY_LENGTH(RESPONSE_TILT_BUSY) - 1U);
+				break;
+			}
+		} else {
+			protocol_emit(protocol, RESPONSE_BAD_ARGUMENT,
+				      ARRAY_LENGTH(RESPONSE_BAD_ARGUMENT) - 1U);
+		}
+	} else if (token_equals(tokens[0], "JOG", 3U)) {
+		int32_t steps;
+
+		if ((token_count != 3U) ||
+		    !token_equals(tokens[1], "TILT", 4U) ||
+		    !parse_int32(tokens[2], &steps)) {
+			protocol_emit(protocol, RESPONSE_BAD_ARGUMENT,
+				      ARRAY_LENGTH(RESPONSE_BAD_ARGUMENT) - 1U);
+		} else {
+			switch (motion_controller_jog_tilt(steps)) {
+			case MOTION_JOG_OK: {
+				static const uint8_t response[] =
+					"OK TILT JOGGING\r\n";
+				protocol_emit(protocol, response,
+					      ARRAY_LENGTH(response) - 1U);
+				break;
+			}
+			case MOTION_JOG_RANGE:
+				protocol_emit(protocol, RESPONSE_JOG_RANGE,
+					      ARRAY_LENGTH(RESPONSE_JOG_RANGE) - 1U);
+				break;
+			case MOTION_JOG_DISABLED:
+				protocol_emit(protocol, RESPONSE_TILT_DISABLED_ERROR,
+					      ARRAY_LENGTH(
+						      RESPONSE_TILT_DISABLED_ERROR) -
+						      1U);
+				break;
+			case MOTION_JOG_NOT_HOMED:
+				protocol_emit(protocol, RESPONSE_TILT_NOT_HOMED,
+					      ARRAY_LENGTH(RESPONSE_TILT_NOT_HOMED) - 1U);
+				break;
+			case MOTION_JOG_BUSY:
+				protocol_emit(protocol, RESPONSE_TILT_BUSY,
+					      ARRAY_LENGTH(RESPONSE_TILT_BUSY) - 1U);
+				break;
+			case MOTION_JOG_MIN_LIMIT:
+				protocol_emit(protocol, RESPONSE_TILT_MIN_LIMIT,
+					      ARRAY_LENGTH(RESPONSE_TILT_MIN_LIMIT) - 1U);
+				break;
+			}
+		}
+	} else if (token_equals(tokens[0], "DIR-CHECK", 9U)) {
+		if ((token_count == 3U) &&
+		    token_equals(tokens[1], "TILT", 4U) &&
+		    (token_equals(tokens[2], "HIGH", 4U) ||
+		     token_equals(tokens[2], "LOW", 3U))) {
+			const bool high = token_equals(tokens[2], "HIGH", 4U);
+			motion_direction_check_result_t result =
+				motion_controller_direction_check_tilt(high);
+
+			if (result == MOTION_DIRECTION_CHECK_OK) {
+				static const uint8_t response[] =
+					"OK TILT DIR_CHECKING\r\n";
+				protocol_emit(protocol, response,
+					      ARRAY_LENGTH(response) - 1U);
+			} else if (result ==
+				   MOTION_DIRECTION_CHECK_DRIVER_NOT_READY) {
+				protocol_emit(protocol,
+					      RESPONSE_TILT_DRIVER_NOT_READY,
+					      ARRAY_LENGTH(
+						      RESPONSE_TILT_DRIVER_NOT_READY) -
+						      1U);
+			} else if (result ==
+				   MOTION_DIRECTION_CHECK_ENDSTOP_ACTIVE) {
+				static const uint8_t response[] =
+					"ERR TILT_ENDSTOP_ACTIVE\r\n";
+				protocol_emit(protocol, response,
+					      ARRAY_LENGTH(response) - 1U);
+			} else if (result ==
+				   MOTION_DIRECTION_CHECK_ALREADY_CALIBRATED) {
+				static const uint8_t response[] =
+					"ERR TILT_DIR_ALREADY_CALIBRATED\r\n";
+				protocol_emit(protocol, response,
+					      ARRAY_LENGTH(response) - 1U);
+			} else {
+				protocol_emit(protocol, RESPONSE_TILT_BUSY,
+					      ARRAY_LENGTH(RESPONSE_TILT_BUSY) - 1U);
+			}
 		} else {
 			protocol_emit(protocol, RESPONSE_BAD_ARGUMENT,
 				      ARRAY_LENGTH(RESPONSE_BAD_ARGUMENT) - 1U);
