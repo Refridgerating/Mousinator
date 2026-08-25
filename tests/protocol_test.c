@@ -24,6 +24,10 @@ static tmc2209_device_t mock_pan_driver;
 static tmc2209_device_t mock_tilt_driver;
 static bool mock_pan_configure_success;
 static bool mock_tilt_configure_success;
+static tmc_uart_diagnostics_t mock_uart_diagnostics;
+static unsigned int mock_refresh_calls;
+static unsigned int mock_configure_calls;
+static unsigned int mock_enable_calls;
 
 static void mock_reset(void)
 {
@@ -40,10 +44,14 @@ static void mock_reset(void)
 	mock_enable_result = PAN_ENABLE_OK;
 	mock_pan_configure_success = true;
 	mock_tilt_configure_success = true;
+	tmc_uart_diagnostics_init(&mock_uart_diagnostics);
+	mock_refresh_calls = 0U;
+	mock_configure_calls = 0U;
+	mock_enable_calls = 0U;
 	tmc2209_device_init(&mock_pan_driver, 2U,
-			 &(tmc2209_transport_t){NULL, NULL, NULL});
+			 &(tmc2209_transport_t){NULL, NULL, NULL, NULL});
 	tmc2209_device_init(&mock_tilt_driver, 1U,
-			 &(tmc2209_transport_t){NULL, NULL, NULL});
+			 &(tmc2209_transport_t){NULL, NULL, NULL, NULL});
 	mock_pan_driver.state = TMC2209_STATE_PRESENT;
 	mock_pan_driver.ioin = (uint32_t)TMC2209_EXPECTED_VERSION <<
 			       TMC2209_IOIN_VERSION_SHIFT;
@@ -58,6 +66,7 @@ void pan_controller_init(void)
 
 pan_enable_result_t pan_controller_enable(void)
 {
+	++mock_enable_calls;
 	if (mock_enable_result == PAN_ENABLE_OK) {
 		mock_snapshot.enabled = true;
 	}
@@ -94,6 +103,7 @@ driver_configure_result_t driver_control_configure(void)
 	driver_configure_result_t result = {mock_pan_configure_success,
 					    mock_tilt_configure_success};
 
+	++mock_configure_calls;
 	mock_pan_driver.state = mock_pan_configure_success ?
 		TMC2209_STATE_CONFIGURED : TMC2209_STATE_ERROR;
 	mock_pan_driver.configuration_valid = mock_pan_configure_success;
@@ -111,6 +121,7 @@ driver_configure_result_t driver_control_configure(void)
 void driver_control_refresh(driver_axis_t axis)
 {
 	(void)axis;
+	++mock_refresh_calls;
 }
 
 const tmc2209_device_t *driver_control_get(driver_axis_t axis)
@@ -124,6 +135,11 @@ bool driver_control_pan_ready(void)
 	       mock_pan_driver.configuration_valid &&
 	       (mock_pan_driver.error == TMC2209_ERROR_NONE) &&
 	       !mock_pan_driver.fatal;
+}
+
+void driver_control_get_uart_diagnostics(tmc_uart_diagnostics_t *diagnostics)
+{
+	*diagnostics = mock_uart_diagnostics;
 }
 
 static bool capture_write(const uint8_t *data, size_t length, void *context)
@@ -310,6 +326,57 @@ static int check_driver_commands(void)
 			  expected, sizeof(expected) - 1U);
 }
 
+static int check_driver_diagnostics(void)
+{
+	static const uint8_t command[] = "DRIVER-DIAG? TILT\n";
+	static const char expected[] =
+		"OK DRIVER_DIAG TILT ADDR=1 UART_ORE=4294967295 "
+		"UART_NE=4294967295 UART_FE=4294967295 UART_PE=4294967295 "
+		"UART_LAST_ADDR=1 UART_LAST_OP=WRITE UART_LAST_REG=0x70 "
+		"UART_FLAGS=0x0F UART_RETRIES=4294967295 LAST_OP=READ "
+		"LAST_REG=0x06 LAST_ATTEMPT=3 TRANSPORT=UART PARSER=CRC "
+		"LAST_CFG_STAGE=CONFIG_STATUS_REFRESH LAST_CFG_REG=0x6F "
+		"LAST_CFG_PHASE=READ LAST_CFG_ERR=UART\r\n";
+	protocol_t protocol;
+	capture_t capture = {{0U}, 0U};
+
+	mock_reset();
+	mock_uart_diagnostics.overrun_count = UINT32_MAX;
+	mock_uart_diagnostics.noise_count = UINT32_MAX;
+	mock_uart_diagnostics.framing_count = UINT32_MAX;
+	mock_uart_diagnostics.parity_count = UINT32_MAX;
+	mock_uart_diagnostics.last_valid = true;
+	mock_uart_diagnostics.last_address = 1U;
+	mock_uart_diagnostics.last_operation = TMC2209_OPERATION_WRITE;
+	mock_uart_diagnostics.last_register = TMC2209_REGISTER_PWMCONF;
+	mock_uart_diagnostics.last_flags = 0x0FU;
+	mock_tilt_driver.diagnostics.retry_count = UINT32_MAX;
+	mock_tilt_driver.diagnostics.last_operation = TMC2209_OPERATION_READ;
+	mock_tilt_driver.diagnostics.last_register = TMC2209_REGISTER_IOIN;
+	mock_tilt_driver.diagnostics.last_attempt = 3U;
+	mock_tilt_driver.diagnostics.last_transport_error = TMC2209_ERROR_UART;
+	mock_tilt_driver.diagnostics.last_parser_error = TMC2209_ERROR_CRC;
+	mock_tilt_driver.diagnostics.last_configuration_stage =
+		TMC2209_FAILURE_STAGE_CONFIG_STATUS_REFRESH;
+	mock_tilt_driver.diagnostics.last_configuration_register =
+		TMC2209_REGISTER_DRV_STATUS;
+	mock_tilt_driver.diagnostics.last_configuration_phase =
+		TMC2209_FAILURE_PHASE_READ;
+	mock_tilt_driver.diagnostics.last_configuration_error =
+		TMC2209_ERROR_UART;
+	protocol_init(&protocol, capture_write, &capture);
+	protocol_receive(&protocol, command, sizeof(command) - 1U);
+	if (!bytes_equal(capture.bytes, capture.length, expected,
+			 sizeof(expected) - 1U) ||
+	    (capture.length > PROTOCOL_MAX_RESPONSE_SIZE) ||
+	    (mock_refresh_calls != 0U) || (mock_configure_calls != 0U) ||
+	    (mock_enable_calls != 0U)) {
+		(void)fprintf(stderr, "FAIL: bounded read-only driver diagnostics\n");
+		return 1;
+	}
+	return 0;
+}
+
 static int check_driver_enable_gate(void)
 {
 	static const uint8_t command[] = "ENABLE PAN\n";
@@ -433,6 +500,8 @@ int main(void)
 		"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nPING\n";
 	static const char recovered_response[] =
 		"ERR COMMAND_TOO_LONG\r\nOK PONG\r\n";
+	static const uint8_t bad_diagnostics[] = "DRIVER-DIAG? ALL\n";
+	static const char bad_argument[] = "ERR BAD_ARGUMENT\r\n";
 	int failures = 0;
 
 	failures += check_case("CR LF CRLF", line_endings,
@@ -448,6 +517,9 @@ int main(void)
 	failures += check_case("oversize recovery", recovered,
 			       sizeof(recovered) - 1U, recovered_response,
 			       sizeof(recovered_response) - 1U);
+	failures += check_case("bad driver diagnostics", bad_diagnostics,
+			       sizeof(bad_diagnostics) - 1U, bad_argument,
+			       sizeof(bad_argument) - 1U);
 	failures += check_fragmented();
 	failures += check_boundaries();
 	failures += check_motion_commands();
@@ -456,6 +528,7 @@ int main(void)
 	failures += check_pending_disable();
 	failures += check_state_extremes();
 	failures += check_driver_commands();
+	failures += check_driver_diagnostics();
 	failures += check_driver_enable_gate();
 	failures += check_driver_configure_guards();
 

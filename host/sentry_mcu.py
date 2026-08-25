@@ -38,6 +38,25 @@ DRIVER_PATTERN = re.compile(
     r"STST=(?P<standstill>[01]) STEALTH=(?P<stealth_active>[01]) "
     r"FATAL=(?P<fatal>[01])$"
 )
+DRIVER_DIAGNOSTIC_PATTERN = re.compile(
+    r"^OK DRIVER_DIAG (?P<axis>PAN|TILT) ADDR=(?P<address>\d+) "
+    r"UART_ORE=(?P<uart_ore>\d+) UART_NE=(?P<uart_ne>\d+) "
+    r"UART_FE=(?P<uart_fe>\d+) UART_PE=(?P<uart_pe>\d+) "
+    r"UART_LAST_ADDR=(?P<uart_last_address>NONE|\d+) "
+    r"UART_LAST_OP=(?P<uart_last_operation>NONE|READ|WRITE) "
+    r"UART_LAST_REG=(?P<uart_last_register>0x[0-9A-F]{2}) "
+    r"UART_FLAGS=(?P<uart_flags>0x[0-9A-F]{2}) "
+    r"UART_RETRIES=(?P<uart_retries>\d+) "
+    r"LAST_OP=(?P<last_operation>NONE|READ|WRITE) "
+    r"LAST_REG=(?P<last_register>0x[0-9A-F]{2}) "
+    r"LAST_ATTEMPT=(?P<last_attempt>\d+) "
+    r"TRANSPORT=(?P<transport_error>[A-Z_]+) "
+    r"PARSER=(?P<parser_error>[A-Z_]+) "
+    r"LAST_CFG_STAGE=(?P<configuration_stage>[A-Z_]+) "
+    r"LAST_CFG_REG=(?P<configuration_register>0x[0-9A-F]{2}) "
+    r"LAST_CFG_PHASE=(?P<configuration_phase>[A-Z_]+) "
+    r"LAST_CFG_ERR=(?P<configuration_error>[A-Z_]+)$"
+)
 
 
 @dataclass(frozen=True)
@@ -71,6 +90,30 @@ class DriverStatus:
     standstill: bool
     stealthchop_active: bool
     fatal: bool
+
+
+@dataclass(frozen=True)
+class DriverDiagnostics:
+    axis: str
+    address: int
+    uart_overrun_count: int
+    uart_noise_count: int
+    uart_framing_count: int
+    uart_parity_count: int
+    uart_last_address: int | None
+    uart_last_operation: str
+    uart_last_register: int
+    uart_flags: int
+    uart_retry_count: int
+    last_operation: str
+    last_register: int
+    last_attempt: int
+    transport_error: str
+    parser_error: str
+    configuration_stage: str
+    configuration_register: int
+    configuration_phase: str
+    configuration_error: str
 
 
 def discover_device() -> str:
@@ -174,6 +217,43 @@ class SentryMcu:
     def configure_drivers(self) -> str:
         return self.expect_ok("DRIVER CONFIGURE")
 
+    def driver_diagnostics(self, axis: str) -> DriverDiagnostics:
+        normalized_axis = axis.upper()
+        if normalized_axis not in ("PAN", "TILT"):
+            raise ValueError("driver axis must be pan or tilt")
+        response = self.expect_ok(f"DRIVER-DIAG? {normalized_axis}")
+        match = DRIVER_DIAGNOSTIC_PATTERN.fullmatch(response)
+        if match is None:
+            raise RuntimeError(
+                f"unexpected DRIVER-DIAG? response: {response}"
+            )
+        fields = match.groupdict()
+        last_address = fields["uart_last_address"]
+        return DriverDiagnostics(
+            axis=fields["axis"],
+            address=int(fields["address"]),
+            uart_overrun_count=int(fields["uart_ore"]),
+            uart_noise_count=int(fields["uart_ne"]),
+            uart_framing_count=int(fields["uart_fe"]),
+            uart_parity_count=int(fields["uart_pe"]),
+            uart_last_address=(
+                None if last_address == "NONE" else int(last_address)
+            ),
+            uart_last_operation=fields["uart_last_operation"],
+            uart_last_register=int(fields["uart_last_register"], 16),
+            uart_flags=int(fields["uart_flags"], 16),
+            uart_retry_count=int(fields["uart_retries"]),
+            last_operation=fields["last_operation"],
+            last_register=int(fields["last_register"], 16),
+            last_attempt=int(fields["last_attempt"]),
+            transport_error=fields["transport_error"],
+            parser_error=fields["parser_error"],
+            configuration_stage=fields["configuration_stage"],
+            configuration_register=int(fields["configuration_register"], 16),
+            configuration_phase=fields["configuration_phase"],
+            configuration_error=fields["configuration_error"],
+        )
+
 
 def driver_is_ready(status: DriverStatus) -> bool:
     return (
@@ -182,6 +262,14 @@ def driver_is_ready(status: DriverStatus) -> bool:
         and status.error == "NONE"
         and not status.fatal
     )
+
+
+def query_driver_report(
+    controller: SentryMcu, axis: str
+) -> tuple[DriverStatus, DriverDiagnostics]:
+    status = controller.driver(axis)
+    diagnostics = controller.driver_diagnostics(axis)
+    return status, diagnostics
 
 
 def prepare_pan_motor_test(controller: SentryMcu, output=print) -> DriverStatus:
@@ -304,7 +392,9 @@ def main() -> int:
             elif args.action == "state":
                 print(controller.state())
             elif args.action == "driver":
-                print(controller.driver(args.axis))
+                status, diagnostics = query_driver_report(controller, args.axis)
+                print(status)
+                print(diagnostics)
             elif args.action == "configure-drivers":
                 print(controller.configure_drivers())
             else:

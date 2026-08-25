@@ -254,6 +254,48 @@ void tmc2209_device_init(tmc2209_device_t *device, uint8_t address,
 	device->interpolate = false;
 	device->stealthchop = false;
 	device->fatal = false;
+	device->diagnostics = (tmc2209_diagnostics_t){0};
+	device->diagnostics.last_operation = TMC2209_OPERATION_NONE;
+	device->diagnostics.last_configuration_stage =
+		TMC2209_FAILURE_STAGE_NONE;
+	device->diagnostics.last_configuration_phase =
+		TMC2209_FAILURE_PHASE_NONE;
+}
+
+static void increment_retry_count(tmc2209_device_t *device)
+{
+	if (device->diagnostics.retry_count != UINT32_MAX) {
+		++device->diagnostics.retry_count;
+	}
+}
+
+static void record_transaction_failure(tmc2209_device_t *device,
+				       tmc2209_operation_t operation,
+				       uint8_t register_address,
+				       uint8_t attempt,
+				       tmc2209_error_t transport_error,
+				       tmc2209_error_t parser_error)
+{
+	device->diagnostics.last_operation = operation;
+	device->diagnostics.last_register = register_address;
+	device->diagnostics.last_attempt = attempt;
+	device->diagnostics.last_transport_error = transport_error;
+	device->diagnostics.last_parser_error = parser_error;
+	device->diagnostics.last_uart_flags =
+		device->transport.uart_flags != NULL ?
+			device->transport.uart_flags(device->transport.context) : 0U;
+}
+
+static tmc2209_error_t record_configuration_failure(
+	tmc2209_device_t *device, tmc2209_failure_stage_t stage,
+	uint8_t register_address, tmc2209_failure_phase_t phase,
+	tmc2209_error_t error)
+{
+	device->diagnostics.last_configuration_stage = stage;
+	device->diagnostics.last_configuration_register = register_address;
+	device->diagnostics.last_configuration_phase = phase;
+	device->diagnostics.last_configuration_error = error;
+	return error;
 }
 
 static tmc2209_error_t exchange_once(tmc2209_device_t *device,
@@ -275,6 +317,8 @@ tmc2209_error_t tmc2209_read_register(tmc2209_device_t *device,
 	uint8_t received[TMC2209_MAX_CAPTURE_SIZE];
 	size_t received_length;
 	tmc2209_error_t error;
+	tmc2209_error_t transport_error;
+	tmc2209_error_t parser_error;
 	uint8_t attempt;
 
 	if (!tmc2209_build_read_datagram(device->address, register_address,
@@ -283,15 +327,26 @@ tmc2209_error_t tmc2209_read_register(tmc2209_device_t *device,
 	}
 
 	for (attempt = 0U; attempt < TMC2209_TRANSACTION_ATTEMPTS; ++attempt) {
-		error = exchange_once(device, request, ARRAY_LENGTH(request), received,
-				      &received_length);
-		if (error == TMC2209_ERROR_NONE) {
-			error = tmc2209_parse_read_response(
+		transport_error = exchange_once(
+			device, request, ARRAY_LENGTH(request), received,
+			&received_length);
+		parser_error = TMC2209_ERROR_NONE;
+		if (transport_error == TMC2209_ERROR_NONE) {
+			parser_error = tmc2209_parse_read_response(
 				request, ARRAY_LENGTH(request), received, received_length,
 				register_address, value);
 		}
+		error = transport_error != TMC2209_ERROR_NONE ? transport_error :
+			parser_error;
 		if (error == TMC2209_ERROR_NONE) {
 			return error;
+		}
+		record_transaction_failure(device, TMC2209_OPERATION_READ,
+					   register_address,
+					   (uint8_t)(attempt + 1U),
+					   transport_error, parser_error);
+		if ((attempt + 1U) < TMC2209_TRANSACTION_ATTEMPTS) {
+			increment_retry_count(device);
 		}
 		if (device->transport.recover != NULL) {
 			device->transport.recover(device->transport.context);
@@ -307,6 +362,8 @@ static tmc2209_error_t write_register(tmc2209_device_t *device,
 	uint8_t received[TMC2209_MAX_CAPTURE_SIZE];
 	size_t received_length;
 	tmc2209_error_t error = TMC2209_ERROR_UART;
+	tmc2209_error_t transport_error;
+	tmc2209_error_t parser_error;
 	uint8_t attempt;
 
 	if (!tmc2209_build_write_datagram(device->address, register_address,
@@ -316,16 +373,27 @@ static tmc2209_error_t write_register(tmc2209_device_t *device,
 	}
 
 	for (attempt = 0U; attempt < TMC2209_TRANSACTION_ATTEMPTS; ++attempt) {
-		error = exchange_once(device, datagram, ARRAY_LENGTH(datagram), received,
-				      &received_length);
-		if ((error == TMC2209_ERROR_NONE) &&
+		transport_error = exchange_once(
+			device, datagram, ARRAY_LENGTH(datagram), received,
+			&received_length);
+		parser_error = TMC2209_ERROR_NONE;
+		if ((transport_error == TMC2209_ERROR_NONE) &&
 		    ((received_length == 0U) ||
 		     ((received_length == ARRAY_LENGTH(datagram)) &&
 		      bytes_equal(datagram, received, ARRAY_LENGTH(datagram))))) {
 			return TMC2209_ERROR_NONE;
 		}
-		if (error == TMC2209_ERROR_NONE) {
-			error = TMC2209_ERROR_ECHO;
+		if (transport_error == TMC2209_ERROR_NONE) {
+			parser_error = TMC2209_ERROR_ECHO;
+		}
+		error = transport_error != TMC2209_ERROR_NONE ? transport_error :
+			parser_error;
+		record_transaction_failure(device, TMC2209_OPERATION_WRITE,
+					   register_address,
+					   (uint8_t)(attempt + 1U),
+					   transport_error, parser_error);
+		if ((attempt + 1U) < TMC2209_TRANSACTION_ATTEMPTS) {
+			increment_retry_count(device);
 		}
 		if (device->transport.recover != NULL) {
 			device->transport.recover(device->transport.context);
@@ -335,6 +403,7 @@ static tmc2209_error_t write_register(tmc2209_device_t *device,
 }
 
 static tmc2209_error_t write_verified(tmc2209_device_t *device,
+				      tmc2209_failure_stage_t stage,
 				      uint8_t register_address, uint32_t value,
 				      bool readable, uint32_t readback_mask)
 {
@@ -346,31 +415,45 @@ static tmc2209_error_t write_verified(tmc2209_device_t *device,
 	error = tmc2209_read_register(device, TMC2209_REGISTER_IFCNT,
 				      &before_value);
 	if (error != TMC2209_ERROR_NONE) {
-		return error;
+		return record_configuration_failure(
+			device, stage, TMC2209_REGISTER_IFCNT,
+			TMC2209_FAILURE_PHASE_IFCNT_BEFORE, error);
 	}
 	error = write_register(device, register_address, value);
 	if (error != TMC2209_ERROR_NONE) {
-		return error;
+		return record_configuration_failure(
+			device, stage, register_address,
+			TMC2209_FAILURE_PHASE_WRITE, error);
 	}
 	error = tmc2209_read_register(device, TMC2209_REGISTER_IFCNT,
 				      &after_value);
 	if (error != TMC2209_ERROR_NONE) {
-		return error;
+		return record_configuration_failure(
+			device, stage, TMC2209_REGISTER_IFCNT,
+			TMC2209_FAILURE_PHASE_IFCNT_AFTER, error);
 	}
 	device->ifcnt = (uint8_t)after_value;
 	if (!tmc2209_ifcnt_advanced((uint8_t)before_value,
 				     (uint8_t)after_value)) {
-		return TMC2209_ERROR_IFCNT;
+		return record_configuration_failure(
+			device, stage, TMC2209_REGISTER_IFCNT,
+			TMC2209_FAILURE_PHASE_IFCNT_COMPARE,
+			TMC2209_ERROR_IFCNT);
 	}
 	if (!readable) {
 		return TMC2209_ERROR_NONE;
 	}
 	error = tmc2209_read_register(device, register_address, &readback);
 	if (error != TMC2209_ERROR_NONE) {
-		return error;
+		return record_configuration_failure(
+			device, stage, register_address,
+			TMC2209_FAILURE_PHASE_READBACK_READ, error);
 	}
 	if ((readback & readback_mask) != (value & readback_mask)) {
-		return TMC2209_ERROR_READBACK;
+		return record_configuration_failure(
+			device, stage, register_address,
+			TMC2209_FAILURE_PHASE_READBACK_COMPARE,
+			TMC2209_ERROR_READBACK);
 	}
 	return TMC2209_ERROR_NONE;
 }
@@ -408,7 +491,8 @@ tmc2209_error_t tmc2209_probe(tmc2209_device_t *device)
 	device->fatal = false;
 
 	error = write_verified(
-		device, TMC2209_REGISTER_NODECONF,
+		device, TMC2209_FAILURE_STAGE_PROBE_NODECONF,
+		TMC2209_REGISTER_NODECONF,
 		(uint32_t)TMC2209_NODECONF_SENDDELAY_3X8_BITS <<
 			TMC2209_NODECONF_SENDDELAY_SHIFT,
 		false, 0U);
@@ -418,34 +502,56 @@ tmc2209_error_t tmc2209_probe(tmc2209_device_t *device)
 	error = tmc2209_read_register(device, TMC2209_REGISTER_IOIN,
 				      &device->ioin);
 	if (error != TMC2209_ERROR_NONE) {
+		(void)record_configuration_failure(
+			device, TMC2209_FAILURE_STAGE_PROBE_IOIN,
+			TMC2209_REGISTER_IOIN, TMC2209_FAILURE_PHASE_READ, error);
 		return set_error(device, error);
 	}
 	if ((uint8_t)(device->ioin >> TMC2209_IOIN_VERSION_SHIFT) !=
 	    TMC2209_EXPECTED_VERSION) {
+		(void)record_configuration_failure(
+			device, TMC2209_FAILURE_STAGE_PROBE_IOIN,
+			TMC2209_REGISTER_IOIN, TMC2209_FAILURE_PHASE_READ,
+			TMC2209_ERROR_VERSION);
 		return set_error(device, TMC2209_ERROR_VERSION);
 	}
 	error = tmc2209_read_register(device, TMC2209_REGISTER_GCONF, &gconf);
 	if (error != TMC2209_ERROR_NONE) {
+		(void)record_configuration_failure(
+			device, TMC2209_FAILURE_STAGE_PROBE_GCONF_READ,
+			TMC2209_REGISTER_GCONF, TMC2209_FAILURE_PHASE_READ, error);
 		return set_error(device, error);
 	}
-	error = write_verified(device, TMC2209_REGISTER_GCONF, gconf, true,
+	error = write_verified(device,
+			       TMC2209_FAILURE_STAGE_PROBE_GCONF_VERIFY,
+			       TMC2209_REGISTER_GCONF, gconf, true,
 			       TMC2209_GCONF_CONFIGURATION_MASK);
 	if (error != TMC2209_ERROR_NONE) {
 		return set_error(device, error);
 	}
 	error = tmc2209_read_register(device, TMC2209_REGISTER_IFCNT, &value);
 	if (error != TMC2209_ERROR_NONE) {
+		(void)record_configuration_failure(
+			device, TMC2209_FAILURE_STAGE_PROBE_IFCNT,
+			TMC2209_REGISTER_IFCNT, TMC2209_FAILURE_PHASE_READ, error);
 		return set_error(device, error);
 	}
 	device->ifcnt = (uint8_t)value;
 	error = tmc2209_read_register(device, TMC2209_REGISTER_GSTAT,
 				      &device->gstat);
 	if (error != TMC2209_ERROR_NONE) {
+		(void)record_configuration_failure(
+			device, TMC2209_FAILURE_STAGE_PROBE_GSTAT,
+			TMC2209_REGISTER_GSTAT, TMC2209_FAILURE_PHASE_READ, error);
 		return set_error(device, error);
 	}
 	error = tmc2209_read_register(device, TMC2209_REGISTER_DRV_STATUS,
 				      &device->drv_status);
 	if (error != TMC2209_ERROR_NONE) {
+		(void)record_configuration_failure(
+			device, TMC2209_FAILURE_STAGE_PROBE_DRV_STATUS,
+			TMC2209_REGISTER_DRV_STATUS,
+			TMC2209_FAILURE_PHASE_READ, error);
 		return set_error(device, error);
 	}
 	device->fatal = tmc2209_status_is_fatal(device->gstat,
@@ -456,6 +562,11 @@ tmc2209_error_t tmc2209_probe(tmc2209_device_t *device)
 		reset_invalidated_configuration = true;
 	}
 	if (device->fatal) {
+		(void)record_configuration_failure(
+			device, TMC2209_FAILURE_STAGE_PROBE_DRV_STATUS,
+			TMC2209_REGISTER_DRV_STATUS,
+			TMC2209_FAILURE_PHASE_READ,
+			TMC2209_ERROR_FATAL_STATUS);
 		return set_error(device, TMC2209_ERROR_FATAL_STATUS);
 	}
 	device->state = TMC2209_STATE_PRESENT;
@@ -467,6 +578,7 @@ tmc2209_error_t tmc2209_probe(tmc2209_device_t *device)
 tmc2209_error_t tmc2209_configure(tmc2209_device_t *device)
 {
 	static const struct {
+		tmc2209_failure_stage_t stage;
 		uint8_t register_address;
 		uint32_t value;
 		bool readable;
@@ -476,17 +588,23 @@ tmc2209_error_t tmc2209_configure(tmc2209_device_t *device)
 		 * This full GCONF write explicitly enables UART/register MRES and
 		 * clears analog scaling, internal sensing, SpreadCycle, and test mode.
 		 */
-		{TMC2209_REGISTER_GCONF, TMC2209_GCONF_VALUE,
+		{TMC2209_FAILURE_STAGE_CONFIG_GCONF,
+		 TMC2209_REGISTER_GCONF, TMC2209_GCONF_VALUE,
 		 true, TMC2209_GCONF_CONFIGURATION_MASK},
-		{TMC2209_REGISTER_CHOPCONF, TMC2209_CHOPCONF_VALUE, true,
+		{TMC2209_FAILURE_STAGE_CONFIG_CHOPCONF,
+		 TMC2209_REGISTER_CHOPCONF, TMC2209_CHOPCONF_VALUE, true,
 		 TMC2209_CHOPCONF_READBACK_MASK},
-		{TMC2209_REGISTER_PWMCONF, TMC2209_PWMCONF_VALUE, true,
+		{TMC2209_FAILURE_STAGE_CONFIG_PWMCONF,
+		 TMC2209_REGISTER_PWMCONF, TMC2209_PWMCONF_VALUE, true,
 		 TMC2209_PWMCONF_READBACK_MASK},
-		{TMC2209_REGISTER_IHOLD_IRUN, TMC2209_IHOLD_IRUN_VALUE, false,
+		{TMC2209_FAILURE_STAGE_CONFIG_IHOLD_IRUN,
+		 TMC2209_REGISTER_IHOLD_IRUN, TMC2209_IHOLD_IRUN_VALUE, false,
 		 0U},
-		{TMC2209_REGISTER_TPOWERDOWN, TMC2209_POWERDOWN_DELAY, false,
+		{TMC2209_FAILURE_STAGE_CONFIG_TPOWERDOWN,
+		 TMC2209_REGISTER_TPOWERDOWN, TMC2209_POWERDOWN_DELAY, false,
 		 0U},
-		{TMC2209_REGISTER_TPWMTHRS, 0U, false, 0U},
+		{TMC2209_FAILURE_STAGE_CONFIG_TPWMTHRS,
+		 TMC2209_REGISTER_TPWMTHRS, 0U, false, 0U},
 	};
 	uint8_t calculated_run_scale;
 	uint8_t calculated_hold_scale;
@@ -516,11 +634,16 @@ tmc2209_error_t tmc2209_configure(tmc2209_device_t *device)
 	    (calculated_run_current != TMC2209_RUN_CURRENT_MA) ||
 	    (calculated_hold_scale != TMC2209_HOLD_CURRENT_SCALE) ||
 	    (calculated_hold_current != TMC2209_HOLD_CURRENT_MA)) {
+		(void)record_configuration_failure(
+			device, TMC2209_FAILURE_STAGE_CONFIG_GCONF,
+			TMC2209_REGISTER_GCONF, TMC2209_FAILURE_PHASE_NONE,
+			TMC2209_ERROR_RANGE);
 		return set_error(device, TMC2209_ERROR_RANGE);
 	}
 
 	for (index = 0U; index < ARRAY_LENGTH(configuration); ++index) {
-		error = write_verified(device, configuration[index].register_address,
+		error = write_verified(device, configuration[index].stage,
+				       configuration[index].register_address,
 				       configuration[index].value,
 				       configuration[index].readable,
 				       configuration[index].mask);
@@ -533,7 +656,9 @@ tmc2209_error_t tmc2209_configure(tmc2209_device_t *device)
 	 * GSTAT.reset is latched. Clear it after applying the configuration so
 	 * any later observation proves that the driver reset afterwards.
 	 */
-	error = write_verified(device, TMC2209_REGISTER_GSTAT,
+	error = write_verified(device,
+			       TMC2209_FAILURE_STAGE_CONFIG_GSTAT_CLEAR,
+			       TMC2209_REGISTER_GSTAT,
 			       TMC2209_GSTAT_RESET, false, 0U);
 	if (error != TMC2209_ERROR_NONE) {
 		return set_error(device, error);
@@ -548,9 +673,24 @@ tmc2209_error_t tmc2209_configure(tmc2209_device_t *device)
 
 	error = tmc2209_refresh_status(device);
 	if (error != TMC2209_ERROR_NONE) {
+		uint8_t failed_register = device->diagnostics.last_register;
+
+		if (error == TMC2209_ERROR_VERSION) {
+			failed_register = TMC2209_REGISTER_IOIN;
+		} else if (error == TMC2209_ERROR_FATAL_STATUS) {
+			failed_register = TMC2209_REGISTER_DRV_STATUS;
+		}
+		(void)record_configuration_failure(
+			device, TMC2209_FAILURE_STAGE_CONFIG_STATUS_REFRESH,
+			failed_register,
+			TMC2209_FAILURE_PHASE_READ, error);
 		return error;
 	}
 	if (!device->configuration_valid) {
+		(void)record_configuration_failure(
+			device, TMC2209_FAILURE_STAGE_CONFIG_STATUS_REFRESH,
+			TMC2209_REGISTER_GSTAT, TMC2209_FAILURE_PHASE_READ,
+			TMC2209_ERROR_RESET);
 		return TMC2209_ERROR_RESET;
 	}
 	return TMC2209_ERROR_NONE;
@@ -653,4 +793,79 @@ const char *tmc2209_error_name(tmc2209_error_t error)
 		return "FATAL";
 	}
 	return "UART";
+}
+
+const char *tmc2209_operation_name(tmc2209_operation_t operation)
+{
+	switch (operation) {
+	case TMC2209_OPERATION_NONE:
+		return "NONE";
+	case TMC2209_OPERATION_READ:
+		return "READ";
+	case TMC2209_OPERATION_WRITE:
+		return "WRITE";
+	}
+	return "NONE";
+}
+
+const char *tmc2209_failure_stage_name(tmc2209_failure_stage_t stage)
+{
+	switch (stage) {
+	case TMC2209_FAILURE_STAGE_NONE:
+		return "NONE";
+	case TMC2209_FAILURE_STAGE_PROBE_NODECONF:
+		return "PROBE_NODECONF";
+	case TMC2209_FAILURE_STAGE_PROBE_IOIN:
+		return "PROBE_IOIN";
+	case TMC2209_FAILURE_STAGE_PROBE_GCONF_READ:
+		return "PROBE_GCONF_READ";
+	case TMC2209_FAILURE_STAGE_PROBE_GCONF_VERIFY:
+		return "PROBE_GCONF_VERIFY";
+	case TMC2209_FAILURE_STAGE_PROBE_IFCNT:
+		return "PROBE_IFCNT";
+	case TMC2209_FAILURE_STAGE_PROBE_GSTAT:
+		return "PROBE_GSTAT";
+	case TMC2209_FAILURE_STAGE_PROBE_DRV_STATUS:
+		return "PROBE_DRV_STATUS";
+	case TMC2209_FAILURE_STAGE_CONFIG_GCONF:
+		return "CONFIG_GCONF";
+	case TMC2209_FAILURE_STAGE_CONFIG_CHOPCONF:
+		return "CONFIG_CHOPCONF";
+	case TMC2209_FAILURE_STAGE_CONFIG_PWMCONF:
+		return "CONFIG_PWMCONF";
+	case TMC2209_FAILURE_STAGE_CONFIG_IHOLD_IRUN:
+		return "CONFIG_IHOLD_IRUN";
+	case TMC2209_FAILURE_STAGE_CONFIG_TPOWERDOWN:
+		return "CONFIG_TPOWERDOWN";
+	case TMC2209_FAILURE_STAGE_CONFIG_TPWMTHRS:
+		return "CONFIG_TPWMTHRS";
+	case TMC2209_FAILURE_STAGE_CONFIG_GSTAT_CLEAR:
+		return "CONFIG_GSTAT_CLEAR";
+	case TMC2209_FAILURE_STAGE_CONFIG_STATUS_REFRESH:
+		return "CONFIG_STATUS_REFRESH";
+	}
+	return "NONE";
+}
+
+const char *tmc2209_failure_phase_name(tmc2209_failure_phase_t phase)
+{
+	switch (phase) {
+	case TMC2209_FAILURE_PHASE_NONE:
+		return "NONE";
+	case TMC2209_FAILURE_PHASE_READ:
+		return "READ";
+	case TMC2209_FAILURE_PHASE_IFCNT_BEFORE:
+		return "IFCNT_BEFORE";
+	case TMC2209_FAILURE_PHASE_WRITE:
+		return "WRITE";
+	case TMC2209_FAILURE_PHASE_IFCNT_AFTER:
+		return "IFCNT_AFTER";
+	case TMC2209_FAILURE_PHASE_IFCNT_COMPARE:
+		return "IFCNT_COMPARE";
+	case TMC2209_FAILURE_PHASE_READBACK_READ:
+		return "READBACK_READ";
+	case TMC2209_FAILURE_PHASE_READBACK_COMPARE:
+		return "READBACK_COMPARE";
+	}
+	return "NONE";
 }

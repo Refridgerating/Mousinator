@@ -69,3 +69,8 @@ bool driver_control_pan_ready(void)
 	       pan_driver.configuration_valid &&
 	       (pan_driver.error == TMC2209_ERROR_NONE) && !pan_driver.fatal;
 }
+
+void driver_control_get_uart_diagnostics(tmc_uart_diagnostics_t *diagnostics)
+{
+	tmc_uart_get_diagnostics(diagnostics);
+}

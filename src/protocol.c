@@ -202,6 +202,16 @@ static void response_append_hex32(response_builder_t *builder, uint32_t value)
 	}
 }
 
+static void response_append_hex8(response_builder_t *builder, uint8_t value)
+{
+	static const char HEX_DIGITS[] = "0123456789ABCDEF";
+
+	response_append_text(builder, "0x");
+	response_append_byte(builder,
+			     (uint8_t)HEX_DIGITS[(value >> 4) & 0x0FU]);
+	response_append_byte(builder, (uint8_t)HEX_DIGITS[value & 0x0FU]);
+}
+
 static void protocol_emit(protocol_t *protocol, const uint8_t *response,
 			  size_t response_length)
 {
@@ -316,6 +326,77 @@ static void protocol_emit_driver(protocol_t *protocol, driver_axis_t axis)
 	response_append_text(&response, " FATAL=");
 	response_append_byte(&response, device->fatal ? (uint8_t)'1' :
 						       (uint8_t)'0');
+	response_append_text(&response, "\r\n");
+
+	if (!response.overflow) {
+		protocol_emit(protocol, response.bytes, response.length);
+	}
+}
+
+static void protocol_emit_driver_diagnostics(protocol_t *protocol,
+					     driver_axis_t axis)
+{
+	const tmc2209_device_t *device = driver_control_get(axis);
+	const tmc2209_diagnostics_t *driver = &device->diagnostics;
+	tmc_uart_diagnostics_t uart;
+	response_builder_t response = {{0U}, 0U, false};
+	const bool is_pan = axis == DRIVER_AXIS_PAN;
+
+	driver_control_get_uart_diagnostics(&uart);
+	response_append_text(&response, "OK DRIVER_DIAG ");
+	response_append_text(&response, is_pan ? "PAN" : "TILT");
+	response_append_text(&response, " ADDR=");
+	response_append_u64(&response, device->address);
+	response_append_text(&response, " UART_ORE=");
+	response_append_u64(&response, uart.overrun_count);
+	response_append_text(&response, " UART_NE=");
+	response_append_u64(&response, uart.noise_count);
+	response_append_text(&response, " UART_FE=");
+	response_append_u64(&response, uart.framing_count);
+	response_append_text(&response, " UART_PE=");
+	response_append_u64(&response, uart.parity_count);
+	response_append_text(&response, " UART_LAST_ADDR=");
+	if (uart.last_valid) {
+		response_append_u64(&response, uart.last_address);
+	} else {
+		response_append_text(&response, "NONE");
+	}
+	response_append_text(&response, " UART_LAST_OP=");
+	response_append_text(&response,
+			     tmc2209_operation_name(uart.last_operation));
+	response_append_text(&response, " UART_LAST_REG=");
+	response_append_hex8(&response, uart.last_register);
+	response_append_text(&response, " UART_FLAGS=");
+	response_append_hex8(&response, uart.last_flags);
+	response_append_text(&response, " UART_RETRIES=");
+	response_append_u64(&response, driver->retry_count);
+	response_append_text(&response, " LAST_OP=");
+	response_append_text(&response,
+			     tmc2209_operation_name(driver->last_operation));
+	response_append_text(&response, " LAST_REG=");
+	response_append_hex8(&response, driver->last_register);
+	response_append_text(&response, " LAST_ATTEMPT=");
+	response_append_u64(&response, driver->last_attempt);
+	response_append_text(&response, " TRANSPORT=");
+	response_append_text(
+		&response, tmc2209_error_name(driver->last_transport_error));
+	response_append_text(&response, " PARSER=");
+	response_append_text(
+		&response, tmc2209_error_name(driver->last_parser_error));
+	response_append_text(&response, " LAST_CFG_STAGE=");
+	response_append_text(
+		&response,
+		tmc2209_failure_stage_name(driver->last_configuration_stage));
+	response_append_text(&response, " LAST_CFG_REG=");
+	response_append_hex8(&response, driver->last_configuration_register);
+	response_append_text(&response, " LAST_CFG_PHASE=");
+	response_append_text(
+		&response,
+		tmc2209_failure_phase_name(driver->last_configuration_phase));
+	response_append_text(&response, " LAST_CFG_ERR=");
+	response_append_text(
+		&response,
+		tmc2209_error_name(driver->last_configuration_error));
 	response_append_text(&response, "\r\n");
 
 	if (!response.overflow) {
@@ -478,6 +559,17 @@ static void protocol_dispatch(protocol_t *protocol, const char *command,
 		} else if ((token_count == 2U) &&
 			   token_equals(tokens[1], "TILT", 4U)) {
 			protocol_emit_driver(protocol, DRIVER_AXIS_TILT);
+		} else {
+			protocol_emit(protocol, RESPONSE_BAD_ARGUMENT,
+				      ARRAY_LENGTH(RESPONSE_BAD_ARGUMENT) - 1U);
+		}
+	} else if (token_equals(tokens[0], "DRIVER-DIAG?", 12U)) {
+		if ((token_count == 2U) &&
+		    token_equals(tokens[1], "PAN", 3U)) {
+			protocol_emit_driver_diagnostics(protocol, DRIVER_AXIS_PAN);
+		} else if ((token_count == 2U) &&
+			   token_equals(tokens[1], "TILT", 4U)) {
+			protocol_emit_driver_diagnostics(protocol, DRIVER_AXIS_TILT);
 		} else {
 			protocol_emit(protocol, RESPONSE_BAD_ARGUMENT,
 				      ARRAY_LENGTH(RESPONSE_BAD_ARGUMENT) - 1U);

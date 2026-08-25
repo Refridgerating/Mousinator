@@ -325,6 +325,8 @@ M3 adds:
 ```text
 DRIVER? PAN
 DRIVER? TILT
+DRIVER-DIAG? PAN
+DRIVER-DIAG? TILT
 DRIVER CONFIGURE
 ```
 
@@ -367,6 +369,22 @@ StealthChop activity, and fatal state. For example:
 ```text
 OK DRIVER PAN ADDR=2 PRESENT=1 CONFIGURED=1 ERR=NONE IFCNT=7 IOIN=0x21000000 GSTAT=0x00000000 DRV=0xC0100000 RUN_MA=520 HOLD_MA=275 MSTEP=16 INTPOL=1 MODE=STEALTHCHOP OTPW=0 STST=1 STEALTH=1 FATAL=0
 ```
+
+`DRIVER-DIAG?` is a read-only snapshot and performs no TMC transaction. It
+reports boot-lifetime, saturating USART3 ORE/NE/FE/PE counters and the last
+address/register active for a raw USART error. Those counters are global
+because PAN and TILT share USART3. Retry totals, the last failed transaction,
+transport-versus-parser error, captured UART flags, and the last failed
+probe/configuration stage are retained independently for each driver. A later
+successful query does not erase this history. For example:
+
+```text
+OK DRIVER_DIAG TILT ADDR=1 UART_ORE=0 UART_NE=4 UART_FE=0 UART_PE=0 UART_LAST_ADDR=1 UART_LAST_OP=READ UART_LAST_REG=0x06 UART_FLAGS=0x04 UART_RETRIES=8 LAST_OP=READ LAST_REG=0x06 LAST_ATTEMPT=2 TRANSPORT=UART PARSER=NONE LAST_CFG_STAGE=PROBE_IOIN LAST_CFG_REG=0x06 LAST_CFG_PHASE=READ LAST_CFG_ERR=UART
+```
+
+`UART_FLAGS` uses the STM32 USART status bit positions in a compact mask:
+PE=`0x01`, FE=`0x02`, NE=`0x04`, and ORE=`0x08`. Counters and retained history
+reset only when the MCU resets; no host command clears them.
 
 The protocol may evolve as requirements become clearer.
 
@@ -663,6 +681,11 @@ python3 host/sentry_mcu.py --device /dev/serial/by-id/<sentry-device> info
 python3 host/sentry_mcu.py --device /dev/serial/by-id/<sentry-device> driver pan
 python3 host/sentry_mcu.py --device /dev/serial/by-id/<sentry-device> driver tilt
 ```
+
+Each host `driver` action performs the live `DRIVER?` query first and then
+prints the cached `DRIVER-DIAG?` snapshot. Repeating the command therefore
+provides a bounded non-motion UART reliability test without configuring or
+enabling either driver.
 
 Confirm PAN only at address 2, TILT only at address 1, CRC-valid reads and
 IFCNT write verification, both enables inactive, and no activity on unused

@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define PROTOCOL_LINE_CAPACITY 64U
-#define PROTOCOL_MAX_RESPONSE_SIZE 256U
+#define PROTOCOL_MAX_RESPONSE_SIZE 400U
 
 typedef bool (*protocol_write_fn)(const uint8_t *data, size_t length,
 					  void *context);

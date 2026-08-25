@@ -78,19 +78,23 @@ firmware.bin: $(BUILD_DIR)/$(PROJECT).elf
 	$(OBJCOPY) -O binary $< $@
 
 test: tests/protocol_test tests/motion_test tests/board_mapping_test \
-		tests/tmc2209_test tests/driver_control_test
+		tests/tmc2209_test tests/driver_control_test \
+		tests/tmc_uart_diagnostics_test
 	./tests/protocol_test
 	./tests/motion_test
 	./tests/board_mapping_test
 	./tests/tmc2209_test
 	./tests/driver_control_test
+	./tests/tmc_uart_diagnostics_test
 	$(PYTHON) tests/host_test.py
 
 tests/protocol_test: tests/protocol_test.c src/protocol.c src/tmc2209.c \
+		src/tmc_uart_diagnostics.c \
 		include/protocol.h include/pan_controller.h include/motion.h \
 		include/driver_control.h include/tmc2209.h
 	$(HOST_CC) -std=c11 -O2 -Iinclude -Wall -Wextra -Wshadow -Wconversion \
-		-Wundef -Werror tests/protocol_test.c src/protocol.c src/tmc2209.c -o $@
+		-Wundef -Werror tests/protocol_test.c src/protocol.c src/tmc2209.c \
+		src/tmc_uart_diagnostics.c -o $@
 
 tests/motion_test: tests/motion_test.c src/motion.c include/motion.h
 	$(HOST_CC) -std=c11 -O2 -Iinclude -Wall -Wextra -Wshadow -Wconversion \
@@ -105,16 +109,26 @@ tests/tmc2209_test: tests/tmc2209_test.c src/tmc2209.c include/tmc2209.h
 		-Wundef -Werror tests/tmc2209_test.c src/tmc2209.c -o $@
 
 tests/driver_control_test: tests/driver_control_test.c src/driver_control.c \
+		src/tmc_uart_diagnostics.c \
 		include/driver_control.h include/tmc2209.h include/tmc_uart.h \
 		include/board.h
 	$(HOST_CC) -std=c11 -O2 -Iinclude -Wall -Wextra -Wshadow -Wconversion \
-		-Wundef -Werror tests/driver_control_test.c src/driver_control.c -o $@
+		-Wundef -Werror tests/driver_control_test.c src/driver_control.c \
+		src/tmc_uart_diagnostics.c -o $@
+
+tests/tmc_uart_diagnostics_test: tests/tmc_uart_diagnostics_test.c \
+		src/tmc_uart_diagnostics.c include/tmc_uart_diagnostics.h \
+		include/tmc2209.h
+	$(HOST_CC) -std=c11 -O2 -Iinclude -Wall -Wextra -Wshadow -Wconversion \
+		-Wundef -Werror tests/tmc_uart_diagnostics_test.c \
+		src/tmc_uart_diagnostics.c -o $@
 
 clean:
 	rm -rf $(BUILD_DIR) firmware.bin tests/protocol_test tests/protocol_test.exe \
 		tests/motion_test tests/motion_test.exe tests/board_mapping_test \
 		tests/board_mapping_test.exe tests/tmc2209_test \
 		tests/tmc2209_test.exe tests/driver_control_test \
-		tests/driver_control_test.exe
+		tests/driver_control_test.exe tests/tmc_uart_diagnostics_test \
+		tests/tmc_uart_diagnostics_test.exe
 
 -include $(DEPENDENCIES)

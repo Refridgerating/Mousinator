@@ -2,6 +2,7 @@
 #define SENTRY_DRIVER_CONTROL_H
 
 #include "tmc2209.h"
+#include "tmc_uart_diagnostics.h"
 
 #include <stdbool.h>
 
@@ -20,5 +21,6 @@ driver_configure_result_t driver_control_configure(void);
 void driver_control_refresh(driver_axis_t axis);
 const tmc2209_device_t *driver_control_get(driver_axis_t axis);
 bool driver_control_pan_ready(void);
+void driver_control_get_uart_diagnostics(tmc_uart_diagnostics_t *diagnostics);
 
 #endif

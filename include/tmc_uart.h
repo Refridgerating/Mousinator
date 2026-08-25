@@ -2,6 +2,7 @@
 #define SENTRY_TMC_UART_H
 
 #include "tmc2209.h"
+#include "tmc_uart_diagnostics.h"
 
 #include <stdbool.h>
 
@@ -11,5 +12,6 @@
 
 bool tmc_uart_init(void);
 tmc2209_transport_t tmc_uart_transport(void);
+void tmc_uart_get_diagnostics(tmc_uart_diagnostics_t *diagnostics);
 
 #endif

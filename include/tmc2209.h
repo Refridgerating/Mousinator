@@ -13,6 +13,11 @@
 #define TMC2209_MAX_CAPTURE_SIZE 16U
 #define TMC2209_TRANSACTION_ATTEMPTS 3U
 
+#define TMC2209_UART_FLAG_PE (1U << 0)
+#define TMC2209_UART_FLAG_FE (1U << 1)
+#define TMC2209_UART_FLAG_NE (1U << 2)
+#define TMC2209_UART_FLAG_ORE (1U << 3)
+
 #define TMC2209_REGISTER_GCONF 0x00U
 #define TMC2209_REGISTER_GSTAT 0x01U
 #define TMC2209_REGISTER_IFCNT 0x02U
@@ -129,16 +134,68 @@ typedef enum {
 	TMC2209_ERROR_FATAL_STATUS
 } tmc2209_error_t;
 
+typedef enum {
+	TMC2209_OPERATION_NONE = 0,
+	TMC2209_OPERATION_READ,
+	TMC2209_OPERATION_WRITE
+} tmc2209_operation_t;
+
+typedef enum {
+	TMC2209_FAILURE_STAGE_NONE = 0,
+	TMC2209_FAILURE_STAGE_PROBE_NODECONF,
+	TMC2209_FAILURE_STAGE_PROBE_IOIN,
+	TMC2209_FAILURE_STAGE_PROBE_GCONF_READ,
+	TMC2209_FAILURE_STAGE_PROBE_GCONF_VERIFY,
+	TMC2209_FAILURE_STAGE_PROBE_IFCNT,
+	TMC2209_FAILURE_STAGE_PROBE_GSTAT,
+	TMC2209_FAILURE_STAGE_PROBE_DRV_STATUS,
+	TMC2209_FAILURE_STAGE_CONFIG_GCONF,
+	TMC2209_FAILURE_STAGE_CONFIG_CHOPCONF,
+	TMC2209_FAILURE_STAGE_CONFIG_PWMCONF,
+	TMC2209_FAILURE_STAGE_CONFIG_IHOLD_IRUN,
+	TMC2209_FAILURE_STAGE_CONFIG_TPOWERDOWN,
+	TMC2209_FAILURE_STAGE_CONFIG_TPWMTHRS,
+	TMC2209_FAILURE_STAGE_CONFIG_GSTAT_CLEAR,
+	TMC2209_FAILURE_STAGE_CONFIG_STATUS_REFRESH
+} tmc2209_failure_stage_t;
+
+typedef enum {
+	TMC2209_FAILURE_PHASE_NONE = 0,
+	TMC2209_FAILURE_PHASE_READ,
+	TMC2209_FAILURE_PHASE_IFCNT_BEFORE,
+	TMC2209_FAILURE_PHASE_WRITE,
+	TMC2209_FAILURE_PHASE_IFCNT_AFTER,
+	TMC2209_FAILURE_PHASE_IFCNT_COMPARE,
+	TMC2209_FAILURE_PHASE_READBACK_READ,
+	TMC2209_FAILURE_PHASE_READBACK_COMPARE
+} tmc2209_failure_phase_t;
+
 typedef tmc2209_error_t (*tmc2209_exchange_fn)(
 	void *context, const uint8_t *transmit, size_t transmit_length,
 	uint8_t *receive, size_t receive_capacity, size_t *receive_length);
 typedef void (*tmc2209_recover_fn)(void *context);
+typedef uint8_t (*tmc2209_uart_flags_fn)(void *context);
 
 typedef struct {
 	tmc2209_exchange_fn exchange;
 	tmc2209_recover_fn recover;
+	tmc2209_uart_flags_fn uart_flags;
 	void *context;
 } tmc2209_transport_t;
+
+typedef struct {
+	uint32_t retry_count;
+	tmc2209_operation_t last_operation;
+	uint8_t last_register;
+	uint8_t last_attempt;
+	tmc2209_error_t last_transport_error;
+	tmc2209_error_t last_parser_error;
+	uint8_t last_uart_flags;
+	tmc2209_failure_stage_t last_configuration_stage;
+	uint8_t last_configuration_register;
+	tmc2209_failure_phase_t last_configuration_phase;
+	tmc2209_error_t last_configuration_error;
+} tmc2209_diagnostics_t;
 
 typedef struct {
 	tmc2209_transport_t transport;
@@ -156,6 +213,7 @@ typedef struct {
 	bool interpolate;
 	bool stealthchop;
 	bool fatal;
+	tmc2209_diagnostics_t diagnostics;
 } tmc2209_device_t;
 
 uint8_t tmc2209_crc(const uint8_t *data, size_t length);
@@ -184,5 +242,8 @@ tmc2209_error_t tmc2209_configure(tmc2209_device_t *device);
 tmc2209_error_t tmc2209_refresh_status(tmc2209_device_t *device);
 const char *tmc2209_state_name(tmc2209_state_t state);
 const char *tmc2209_error_name(tmc2209_error_t error);
+const char *tmc2209_operation_name(tmc2209_operation_t operation);
+const char *tmc2209_failure_stage_name(tmc2209_failure_stage_t stage);
+const char *tmc2209_failure_phase_name(tmc2209_failure_phase_t phase);
 
 #endif

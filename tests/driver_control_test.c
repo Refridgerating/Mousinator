@@ -13,6 +13,7 @@ static unsigned int tilt_configure_calls;
 static bool pan_configure_success;
 static bool tilt_configure_success;
 static bool tilt_refresh_fails;
+static tmc_uart_diagnostics_t mock_uart_diagnostics;
 
 static int check(bool condition, const char *name)
 {
@@ -30,7 +31,7 @@ bool tmc_uart_init(void)
 
 tmc2209_transport_t tmc_uart_transport(void)
 {
-	return (tmc2209_transport_t){NULL, NULL, NULL};
+	return (tmc2209_transport_t){NULL, NULL, NULL, NULL};
 }
 
 void tmc2209_device_init(tmc2209_device_t *device, uint8_t address,
@@ -91,6 +92,10 @@ tmc2209_error_t tmc2209_refresh_status(tmc2209_device_t *device)
 	if ((device->address == BOARD_TILT_TMC_ADDRESS) && tilt_refresh_fails) {
 		device->state = TMC2209_STATE_ERROR;
 		device->error = TMC2209_ERROR_TIMEOUT;
+		device->diagnostics.last_operation = TMC2209_OPERATION_READ;
+		device->diagnostics.last_register = TMC2209_REGISTER_IOIN;
+		device->diagnostics.last_attempt = 3U;
+		device->diagnostics.last_transport_error = TMC2209_ERROR_TIMEOUT;
 		return TMC2209_ERROR_TIMEOUT;
 	}
 	device->state = device->configuration_valid ?
@@ -99,15 +104,24 @@ tmc2209_error_t tmc2209_refresh_status(tmc2209_device_t *device)
 	return TMC2209_ERROR_NONE;
 }
 
+void tmc_uart_get_diagnostics(tmc_uart_diagnostics_t *diagnostics)
+{
+	*diagnostics = mock_uart_diagnostics;
+}
+
 int main(void)
 {
 	const tmc2209_device_t *tilt;
+	const tmc2209_device_t *pan;
+	tmc_uart_diagnostics_t uart_snapshot;
 	driver_configure_result_t result;
 	int failures = 0;
 
 	pan_configure_success = true;
 	tilt_configure_success = true;
 	tilt_refresh_fails = false;
+	tmc_uart_diagnostics_init(&mock_uart_diagnostics);
+	mock_uart_diagnostics.overrun_count = 1U;
 	driver_control_init();
 	pan_probe_calls = 0U;
 	tilt_probe_calls = 0U;
@@ -126,8 +140,13 @@ int main(void)
 	tilt_refresh_fails = true;
 	driver_control_refresh(DRIVER_AXIS_TILT);
 	tilt = driver_control_get(DRIVER_AXIS_TILT);
+	pan = driver_control_get(DRIVER_AXIS_PAN);
+	driver_control_get_uart_diagnostics(&uart_snapshot);
 	failures += check(tilt->state == TMC2209_STATE_ERROR &&
 			  tilt->configuration_valid &&
+			  tilt->diagnostics.last_operation == TMC2209_OPERATION_READ &&
+			  pan->diagnostics.last_operation == TMC2209_OPERATION_NONE &&
+			  uart_snapshot.overrun_count == 1U &&
 			  driver_control_pan_ready(),
 			  "TILT communication failure leaves PAN independently ready");
 	tilt_refresh_fails = false;
