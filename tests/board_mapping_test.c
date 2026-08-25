@@ -43,8 +43,9 @@ int main(void)
 			  BOARD_TILT_ENDSTOP_PIN_NUMBER == 2U &&
 			  BOARD_TILT_ENDSTOP_ACTIVE_LOW == 0U,
 			  "TILT Z-endstop is hardware-validated active-high PC2");
-	failures += check(BOARD_TILT_DIRECTION_CALIBRATED == 0U,
-			  "TILT direction remains gated until physical validation");
+	failures += check(BOARD_TILT_DIRECTION_CALIBRATED == 1U &&
+			  BOARD_TILT_POSITIVE_DIRECTION_HIGH == 1U,
+			  "TILT PC5 LOW is CCW/home and HIGH is CW/away");
 	failures += check(BOARD_TMC_UART_TX_GPIO_PORT == BOARD_GPIO_PORT_C &&
 			  BOARD_TMC_UART_TX_PIN_NUMBER == 10U &&
 			  BOARD_TMC_UART_RX_GPIO_PORT == BOARD_GPIO_PORT_C &&

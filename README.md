@@ -416,11 +416,10 @@ require a successful home; reset or `DISABLE TILT` clears the reference.
 The Z endstop is PC2 with an internal pull-up. The installed switch path was
 hardware-validated as LOW when released and HIGH when pressed, so it is
 interpreted as active-high. `ENDSTOP? TILT` is read-only and must be manually
-checked before homing. The production build deliberately starts with TILT direction
-uncalibrated. With the mechanism clear of the switch, `DIR-CHECK TILT HIGH` or
-`LOW` emits exactly ten slow edges and disables again. Set
-`BOARD_TILT_POSITIVE_DIRECTION_HIGH` and `BOARD_TILT_DIRECTION_CALIBRATED` only
-after observing which PC5 level rotates clockwise away from home.
+checked before homing. TILT direction is hardware-validated and compiled in:
+PC5 LOW rotates CCW toward home, while PC5 HIGH rotates CW away from home.
+Logical negative motion and HOME therefore use LOW; logical positive motion
+uses HIGH. Raw `DIR-CHECK TILT` commands are rejected once calibrated.
 
 Homing is asynchronous and bounded: release if initially triggered, approach
 at 150 steps/s, back off at 50 steps/s, and re-approach at 50 steps/s. The fast

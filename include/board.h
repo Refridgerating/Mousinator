@@ -37,9 +37,9 @@
 /* Hardware-validated switch states: released LOW, pressed HIGH. */
 #define BOARD_TILT_ENDSTOP_ACTIVE_LOW 0U
 
-/* Set these only after the bounded physical PC5 direction check. */
-#define BOARD_TILT_DIRECTION_CALIBRATED 0U
-#define BOARD_TILT_POSITIVE_DIRECTION_HIGH 0U
+/* Hardware-validated PC5 polarity: LOW is CCW/home, HIGH is CW/away. */
+#define BOARD_TILT_DIRECTION_CALIBRATED 1U
+#define BOARD_TILT_POSITIVE_DIRECTION_HIGH 1U
 
 /* Shared TMC2209 UART uses USART3 partial remap on PC10/PC11. */
 #define BOARD_TMC_UART_TX_GPIO_PORT BOARD_GPIO_PORT_C
