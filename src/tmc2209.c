@@ -59,19 +59,6 @@ _Static_assert((TMC2209_GCONF_VALUE & TMC2209_GCONF_REQUIRED_SET_MASK) ==
 _Static_assert((TMC2209_GCONF_VALUE & TMC2209_GCONF_REQUIRED_CLEAR_MASK) == 0U,
 	       "GCONF must clear analog/current/SpreadCycle/test prerequisites");
 
-static bool bytes_equal(const uint8_t *left, const uint8_t *right,
-			size_t length)
-{
-	size_t index;
-
-	for (index = 0U; index < length; ++index) {
-		if (left[index] != right[index]) {
-			return false;
-		}
-	}
-	return true;
-}
-
 uint8_t tmc2209_crc(const uint8_t *data, size_t length)
 {
 	uint8_t crc = 0U;
@@ -132,32 +119,30 @@ tmc2209_error_t tmc2209_parse_read_response(
 	const uint8_t *request, size_t request_length, const uint8_t *received,
 	size_t received_length, uint8_t expected_register, uint32_t *value)
 {
-	const uint8_t *reply = received;
-
+	(void)request;
 	if (received_length == (request_length + TMC2209_REPLY_DATAGRAM_SIZE)) {
-		if (!bytes_equal(request, received, request_length)) {
-			return TMC2209_ERROR_ECHO;
-		}
-		reply = &received[request_length];
-	} else if (received_length != TMC2209_REPLY_DATAGRAM_SIZE) {
+		return TMC2209_ERROR_ECHO;
+	}
+	if (received_length != TMC2209_REPLY_DATAGRAM_SIZE) {
 		return TMC2209_ERROR_TIMEOUT;
 	}
 
-	if (reply[0] != TMC2209_SYNC_BYTE) {
+	if (received[0] != TMC2209_SYNC_BYTE) {
 		return TMC2209_ERROR_SYNC;
 	}
-	if (reply[1] != TMC2209_MASTER_ADDRESS) {
+	if (received[1] != TMC2209_MASTER_ADDRESS) {
 		return TMC2209_ERROR_ADDRESS;
 	}
-	if (reply[2] != expected_register) {
+	if (received[2] != expected_register) {
 		return TMC2209_ERROR_REGISTER;
 	}
-	if (tmc2209_crc(reply, TMC2209_REPLY_DATAGRAM_SIZE - 1U) != reply[7]) {
+	if (tmc2209_crc(received, TMC2209_REPLY_DATAGRAM_SIZE - 1U) != received[7]) {
 		return TMC2209_ERROR_CRC;
 	}
 
-	*value = ((uint32_t)reply[3] << 24) | ((uint32_t)reply[4] << 16) |
-		 ((uint32_t)reply[5] << 8) | (uint32_t)reply[6];
+	*value = ((uint32_t)received[3] << 24) |
+		 ((uint32_t)received[4] << 16) |
+		 ((uint32_t)received[5] << 8) | (uint32_t)received[6];
 	return TMC2209_ERROR_NONE;
 }
 
@@ -378,9 +363,7 @@ static tmc2209_error_t write_register(tmc2209_device_t *device,
 			&received_length);
 		parser_error = TMC2209_ERROR_NONE;
 		if ((transport_error == TMC2209_ERROR_NONE) &&
-		    ((received_length == 0U) ||
-		     ((received_length == ARRAY_LENGTH(datagram)) &&
-		      bytes_equal(datagram, received, ARRAY_LENGTH(datagram))))) {
+		    (received_length == 0U)) {
 			return TMC2209_ERROR_NONE;
 		}
 		if (transport_error == TMC2209_ERROR_NONE) {

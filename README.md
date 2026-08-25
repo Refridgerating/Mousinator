@@ -635,17 +635,26 @@ AFIO write also preserves TIM2 partial-remap 2 and the established disabled-SWJ
 setting, leaving M2 PAN STEP/DIR generation unchanged.
 
 The SKR schematic combines TX and RX through R72/R73 (100 ohm) and R74
-(1 kohm), so the polling transport expects transmitted bytes to appear on RX.
-It captures at most one exact request echo plus one reply, discards only an
-exact echo, validates the reply, bounds each transaction attempt to 5 ms, and
-retries at most three times. At 40000 baud, an 8N1 read occupies 1.0 ms for the
-four-byte request, 0.6 ms for unchanged `SENDDELAY=2` (24 bit times), and
-2.0 ms for the eight-byte reply: 3.6 ms total, leaving 1.4 ms within the
-unchanged timeout. An eight-byte write plus the existing 100 us capture window
-takes about 2.1 ms. Recovery remains unchanged at 200 us, which is 8 bit times
-at this experimental rate; no recovery timing, retry, echo, or RX/TX sequencing
-change is included in this experiment. All TMC I/O runs during boot or a USB
-command in main context; TIM2/TIM3 interrupt handlers never call it.
+(1 kohm). Powered-board diagnostics at 40 kbaud showed framing errors while
+receiving the combined MCU self-echo and TMC reply stream, so this follow-up M3
+transport experiment separates transmit and receive phases in the same style
+as Klipper's TMC communication. USART3 RX is disabled while the four- or
+eight-byte request is transmitted. After the final byte reaches `TC`, firmware
+clears TX-associated RX/error state while RX remains disabled, enables RX, and
+accepts only the expected eight-byte TMC read reply. Writes do not require an
+echo; IFCNT advancement and masked readable-register checks remain their
+authoritative verification. This is an experiment, not yet a final transport
+architecture decision.
+
+Each attempt remains bounded to 5 ms and each transaction receives at most
+three attempts. At 40000 baud, an 8N1 read occupies 1.0 ms for the four-byte
+request, 0.6 ms for unchanged `SENDDELAY=2` (24 bit times), and 2.0 ms for the
+eight-byte reply: 3.6 ms total, leaving 1.4 ms within the unchanged timeout. An
+eight-byte write occupies about 2.0 ms. Recovery remains unchanged at 200 us,
+which is 8 bit times at this experimental rate. Baud, SENDDELAY, retry count,
+transaction timeout, diagnostics, and all driver and motion safety behavior
+are otherwise unchanged. All TMC I/O runs during boot or a USB command in main
+context; TIM2/TIM3 interrupt handlers never call it.
 
 Datagrams follow TMC2209 Rev. 1.09 directly: sync `0x05`, four-byte reads,
 eight-byte writes/replies, data most-significant byte first, master reply

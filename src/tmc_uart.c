@@ -12,7 +12,6 @@
 
 #define TMC_USART USART3
 #define TMC_UART_CLOCKS_PER_US 72U
-#define TMC_UART_TURNAROUND_CAPTURE_US 100U
 #define TMC_UART_ERROR_FLAGS \
 	(USART_SR_ORE | USART_SR_NE | USART_SR_FE | USART_SR_PE)
 
@@ -107,24 +106,29 @@ static tmc2209_error_t capture_available(uint8_t *receive,
 	return TMC2209_ERROR_NONE;
 }
 
-static tmc2209_error_t wait_for_flag(uint32_t flag, uint32_t start_cycles,
-				     uint8_t *receive,
-				     size_t receive_capacity,
-				     size_t *receive_length)
+static tmc2209_error_t wait_for_transmit_flag(uint32_t flag,
+					      uint32_t start_cycles)
 {
 	while ((USART_SR(TMC_USART) & flag) == 0U) {
-		tmc2209_error_t error = capture_available(
-			receive, receive_capacity, receive_length);
-
-		if (error != TMC2209_ERROR_NONE) {
-			return error;
-		}
 		if (deadline_expired(start_cycles,
 				     TMC_UART_TRANSACTION_TIMEOUT_US)) {
 			return TMC2209_ERROR_TIMEOUT;
 		}
 	}
-	return capture_available(receive, receive_capacity, receive_length);
+	return TMC2209_ERROR_NONE;
+}
+
+static void disable_receiver_for_transmit(void)
+{
+	/* USART3 TX and RX have independent enables on STM32F103. */
+	USART_CR1(TMC_USART) &= ~(uint32_t)USART_CR1_RE;
+}
+
+static void start_receive_phase(void)
+{
+	/* Discard all TX-associated state before accepting the TMC reply. */
+	clear_receive_state(true);
+	USART_CR1(TMC_USART) |= USART_CR1_RE;
 }
 
 static tmc2209_error_t tmc_uart_exchange(
@@ -151,55 +155,38 @@ static tmc2209_error_t tmc_uart_exchange(
 	active_register = (uint8_t)(transmit[2] & 0x7FU);
 	current_exchange_uart_flags = 0U;
 	*receive_length = 0U;
+	disable_receiver_for_transmit();
 	start_cycles = DWT_CYCCNT;
 	for (index = 0U; index < transmit_length; ++index) {
-		error = wait_for_flag(USART_SR_TXE, start_cycles, receive,
-				      receive_capacity, receive_length);
+		error = wait_for_transmit_flag(USART_SR_TXE, start_cycles);
 		if (error != TMC2209_ERROR_NONE) {
+			start_receive_phase();
 			return error;
 		}
 		usart_send(TMC_USART, transmit[index]);
 	}
-	error = wait_for_flag(USART_SR_TC, start_cycles, receive, receive_capacity,
-			      receive_length);
+	error = wait_for_transmit_flag(USART_SR_TC, start_cycles);
 	if (error != TMC2209_ERROR_NONE) {
+		start_receive_phase();
 		return error;
 	}
+	start_receive_phase();
 
 	if (transmit_length == TMC2209_WRITE_DATAGRAM_SIZE) {
-		const uint32_t turnaround_start = DWT_CYCCNT;
-
-		while (!deadline_expired(turnaround_start,
-					 TMC_UART_TURNAROUND_CAPTURE_US)) {
-			error = capture_available(receive, receive_capacity,
-						  receive_length);
-			if (error != TMC2209_ERROR_NONE) {
-				return error;
-			}
-		}
 		return TMC2209_ERROR_NONE;
 	}
 
-	for (;;) {
-		size_t expected_length = TMC2209_REPLY_DATAGRAM_SIZE;
-
+	while (*receive_length < TMC2209_REPLY_DATAGRAM_SIZE) {
 		error = capture_available(receive, receive_capacity, receive_length);
 		if (error != TMC2209_ERROR_NONE) {
 			return error;
-		}
-		if ((*receive_length >= transmit_length) &&
-		    (receive[0] == transmit[0]) && (receive[1] == transmit[1]) &&
-		    (receive[2] == transmit[2]) && (receive[3] == transmit[3])) {
-			expected_length += transmit_length;
-		}
-		if (*receive_length >= expected_length) {
-			return TMC2209_ERROR_NONE;
 		}
 		if (deadline_expired(start_cycles,
 				     TMC_UART_TRANSACTION_TIMEOUT_US)) {
 			return TMC2209_ERROR_TIMEOUT;
 		}
 	}
+	return TMC2209_ERROR_NONE;
 }
 
 static void tmc_uart_recover(void *context)

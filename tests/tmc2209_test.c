@@ -11,7 +11,6 @@ typedef struct {
 	uint8_t errors_before_success;
 	uint8_t calls;
 	uint8_t recoveries;
-	bool include_echo;
 	bool corrupt_crc;
 	tmc2209_error_t injected_error;
 	uint8_t uart_flags;
@@ -53,25 +52,10 @@ static tmc2209_error_t fake_exchange(
 		return fake->injected_error;
 	}
 	if (transmit_length != TMC2209_READ_DATAGRAM_SIZE) {
-		if (receive_capacity < transmit_length) {
-			return TMC2209_ERROR_CAPTURE_OVERFLOW;
-		}
-		for (index = 0U; index < transmit_length; ++index) {
-			receive[index] = transmit[index];
-		}
-		*receive_length = transmit_length;
+		*receive_length = 0U;
 		return TMC2209_ERROR_NONE;
 	}
 
-	if (fake->include_echo) {
-		if (receive_capacity < transmit_length) {
-			return TMC2209_ERROR_CAPTURE_OVERFLOW;
-		}
-		for (index = 0U; index < transmit_length; ++index) {
-			receive[index] = transmit[index];
-		}
-		offset = transmit_length;
-	}
 	if ((receive_capacity - offset) < TMC2209_REPLY_DATAGRAM_SIZE) {
 		return TMC2209_ERROR_CAPTURE_OVERFLOW;
 	}
@@ -116,7 +100,6 @@ static tmc2209_error_t register_exchange(
 	const tmc2209_operation_t operation =
 		transmit_length == TMC2209_WRITE_DATAGRAM_SIZE ?
 			TMC2209_OPERATION_WRITE : TMC2209_OPERATION_READ;
-	size_t index;
 
 	if ((fake->fail_remaining > 0U) &&
 	    (fake->fail_operation == operation) &&
@@ -129,12 +112,6 @@ static tmc2209_error_t register_exchange(
 		}
 	}
 
-	if (receive_capacity < transmit_length) {
-		return TMC2209_ERROR_CAPTURE_OVERFLOW;
-	}
-	for (index = 0U; index < transmit_length; ++index) {
-		receive[index] = transmit[index];
-	}
 	if (transmit_length == TMC2209_WRITE_DATAGRAM_SIZE) {
 		const uint32_t value = ((uint32_t)transmit[3] << 24) |
 			((uint32_t)transmit[4] << 16) |
@@ -148,16 +125,16 @@ static tmc2209_error_t register_exchange(
 		}
 		fake->ifcnt = (uint8_t)(fake->ifcnt + 1U);
 		++fake->write_count;
-		*receive_length = transmit_length;
+		*receive_length = 0U;
 		return TMC2209_ERROR_NONE;
 	}
-	if ((receive_capacity - transmit_length) < TMC2209_REPLY_DATAGRAM_SIZE) {
+	if (receive_capacity < TMC2209_REPLY_DATAGRAM_SIZE) {
 		return TMC2209_ERROR_CAPTURE_OVERFLOW;
 	}
 	{
 		uint32_t value = register_address == TMC2209_REGISTER_IFCNT ?
 			(uint32_t)fake->ifcnt : fake->registers[register_address];
-		uint8_t *reply = &receive[transmit_length];
+		uint8_t *reply = receive;
 
 		if ((fake->corrupt_read_mask != 0U) &&
 		    (register_address == fake->corrupt_read_register)) {
@@ -172,7 +149,7 @@ static tmc2209_error_t register_exchange(
 		reply[6] = (uint8_t)value;
 		reply[7] = tmc2209_crc(reply, TMC2209_REPLY_DATAGRAM_SIZE - 1U);
 	}
-	*receive_length = transmit_length + TMC2209_REPLY_DATAGRAM_SIZE;
+	*receive_length = TMC2209_REPLY_DATAGRAM_SIZE;
 	return TMC2209_ERROR_NONE;
 }
 
@@ -224,6 +201,12 @@ static int test_response_validation(void)
 
 	(void)tmc2209_build_read_datagram(2U, TMC2209_REGISTER_IOIN, request,
 					  sizeof(request));
+	failures += check(tmc2209_parse_read_response(
+				  request, sizeof(request), reply, sizeof(reply),
+				  TMC2209_REGISTER_IOIN, &value) ==
+				  TMC2209_ERROR_NONE &&
+				  value == 0x21000000UL,
+			  "accept reply without request echo");
 	for (index = 0U; index < sizeof(request); ++index) {
 		echoed[index] = request[index];
 	}
@@ -233,9 +216,14 @@ static int test_response_validation(void)
 	failures += check(tmc2209_parse_read_response(
 				  request, sizeof(request), echoed, sizeof(echoed),
 				  TMC2209_REGISTER_IOIN, &value) ==
-				  TMC2209_ERROR_NONE &&
-				  value == 0x21000000UL,
-			  "accept exact echo and reply");
+				  TMC2209_ERROR_ECHO,
+			  "reject request echo before reply");
+	reply[0] = 0x04U;
+	failures += check(tmc2209_parse_read_response(
+				  request, sizeof(request), reply, sizeof(reply),
+				  TMC2209_REGISTER_IOIN, &value) == TMC2209_ERROR_SYNC,
+			  "reject response sync");
+	reply[0] = TMC2209_SYNC_BYTE;
 	reply[7] ^= 1U;
 	failures += check(tmc2209_parse_read_response(
 				  request, sizeof(request), reply, sizeof(reply),
@@ -261,7 +249,7 @@ static int test_response_validation(void)
 static int test_retry_and_timeout(void)
 {
 	fake_transport_t fake = {
-		0x21000000UL, 2U, 0U, 0U, true, false,
+		0x21000000UL, 2U, 0U, 0U, false,
 		TMC2209_ERROR_TIMEOUT, 0U};
 	tmc2209_transport_t transport = {
 		fake_exchange, fake_recover, fake_uart_flags, &fake};
@@ -548,7 +536,7 @@ static int test_probe_configuration_and_readback(void)
 			  device.configuration_valid,
 			  "configuration state transition");
 	failures += check(fake.ifcnt == 9U && fake.write_count == 9U,
-			  "all configuration writes verified by IFCNT");
+			  "writes without echo are verified by IFCNT");
 	failures += check(fake.registers[TMC2209_REGISTER_GSTAT] == 0U,
 			  "configuration establishes cleared reset baseline");
 	{
@@ -648,7 +636,7 @@ static int test_configuration_validity_transitions(void)
 	tmc2209_transport_t register_transport = {
 		register_exchange, NULL, NULL, &registers};
 	fake_transport_t timeout = {
-		0U, UINT8_MAX, 0U, 0U, false, false,
+		0U, UINT8_MAX, 0U, 0U, false,
 		TMC2209_ERROR_TIMEOUT, 0U};
 	tmc2209_transport_t timeout_transport = {
 		fake_exchange, fake_recover, fake_uart_flags, &timeout};

@@ -86,6 +86,7 @@ test: tests/protocol_test tests/motion_test tests/board_mapping_test \
 	./tests/tmc2209_test
 	./tests/driver_control_test
 	./tests/tmc_uart_diagnostics_test
+	$(PYTHON) tests/tmc_uart_transport_test.py
 	$(PYTHON) tests/host_test.py
 
 tests/protocol_test: tests/protocol_test.c src/protocol.c src/tmc2209.c \
