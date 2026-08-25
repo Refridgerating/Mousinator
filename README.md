@@ -625,19 +625,27 @@ motion was observed on other outputs.
 
 ## M3 TMC2209 Architecture
 
-The shared TMC bus uses STM32 USART3 at 115200 baud, 8 data bits, no parity,
-and one stop bit. USART3 AFIO partial remap (`01`) routes TX to PC10 and RX to
-PC11; full remap is not applicable because it routes to PD8/PD9. Every AFIO
-write also preserves TIM2 partial-remap 2 and the established disabled-SWJ
+The shared TMC bus currently uses STM32 USART3 at 40000 baud, 8 data bits, no
+parity, and one stop bit. This is an M3 transport experiment based on the
+known-good Klipper TMC UART rate after powered-board diagnostics showed
+recovered FE, ORE, and NE events at 115200 baud; it is not yet a final
+architecture decision. USART3 AFIO partial remap (`01`) routes TX to PC10 and
+RX to PC11; full remap is not applicable because it routes to PD8/PD9. Every
+AFIO write also preserves TIM2 partial-remap 2 and the established disabled-SWJ
 setting, leaving M2 PAN STEP/DIR generation unchanged.
 
 The SKR schematic combines TX and RX through R72/R73 (100 ohm) and R74
 (1 kohm), so the polling transport expects transmitted bytes to appear on RX.
 It captures at most one exact request echo plus one reply, discards only an
 exact echo, validates the reply, bounds each transaction attempt to 5 ms, and
-retries at most three times. Recovery waits 200 us—more than 12 bit times at
-115200 baud—using the Cortex-M3 cycle counter. All TMC I/O runs during boot or
-a USB command in main context; TIM2/TIM3 interrupt handlers never call it.
+retries at most three times. At 40000 baud, an 8N1 read occupies 1.0 ms for the
+four-byte request, 0.6 ms for unchanged `SENDDELAY=2` (24 bit times), and
+2.0 ms for the eight-byte reply: 3.6 ms total, leaving 1.4 ms within the
+unchanged timeout. An eight-byte write plus the existing 100 us capture window
+takes about 2.1 ms. Recovery remains unchanged at 200 us, which is 8 bit times
+at this experimental rate; no recovery timing, retry, echo, or RX/TX sequencing
+change is included in this experiment. All TMC I/O runs during boot or a USB
+command in main context; TIM2/TIM3 interrupt handlers never call it.
 
 Datagrams follow TMC2209 Rev. 1.09 directly: sync `0x05`, four-byte reads,
 eight-byte writes/replies, data most-significant byte first, master reply
