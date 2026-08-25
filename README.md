@@ -413,9 +413,10 @@ commands before changing either target, and each nonzero target has its own
 1000 ms lease. `STOP` commands both axes toward zero. TILT velocity and JOG
 require a successful home; reset or `DISABLE TILT` clears the reference.
 
-The Z endstop is PC2 with an internal pull-up. Open reads HIGH and an actuated
-switch reads LOW. `ENDSTOP? TILT` is read-only and must be manually checked
-before homing. The production build deliberately starts with TILT direction
+The Z endstop is PC2 with an internal pull-up. The installed switch path was
+hardware-validated as LOW when released and HIGH when pressed, so it is
+interpreted as active-high. `ENDSTOP? TILT` is read-only and must be manually
+checked before homing. The production build deliberately starts with TILT direction
 uncalibrated. With the mechanism clear of the switch, `DIR-CHECK TILT HIGH` or
 `LOW` emits exactly ten slow edges and disables again. Set
 `BOARD_TILT_POSITIVE_DIRECTION_HIGH` and `BOARD_TILT_DIRECTION_CALIBRATED` only

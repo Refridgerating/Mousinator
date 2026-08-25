@@ -34,7 +34,8 @@
 #define BOARD_TILT_ENDSTOP_GPIO_PORT BOARD_GPIO_PORT_C
 #define BOARD_TILT_ENDSTOP_PIN_NUMBER 2U
 #define BOARD_TILT_ENDSTOP_PIN_MASK (1U << BOARD_TILT_ENDSTOP_PIN_NUMBER)
-#define BOARD_TILT_ENDSTOP_ACTIVE_LOW 1U
+/* Hardware-validated switch states: released LOW, pressed HIGH. */
+#define BOARD_TILT_ENDSTOP_ACTIVE_LOW 0U
 
 /* Set these only after the bounded physical PC5 direction check. */
 #define BOARD_TILT_DIRECTION_CALIBRATED 0U

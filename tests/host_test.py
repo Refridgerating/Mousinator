@@ -218,13 +218,13 @@ class M4ParsingTests(unittest.TestCase):
 
         def expect_ok(command):
             commands.append(command)
-            return "OK TILT ENDSTOP=1 RAW=0"
+            return "OK TILT ENDSTOP=1 RAW=1"
 
         controller.expect_ok = expect_ok
         parsed = controller.endstop()
         self.assertIsInstance(parsed, EndstopState)
         self.assertTrue(parsed.triggered)
-        self.assertFalse(parsed.raw_high)
+        self.assertTrue(parsed.raw_high)
         self.assertEqual(commands, ["ENDSTOP? TILT"])
 
 

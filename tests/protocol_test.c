@@ -55,7 +55,7 @@ static void mock_reset(void)
 	mock_jog_result = MOTION_JOG_OK;
 	mock_direction_result = MOTION_DIRECTION_CHECK_OK;
 	mock_last_jog = 0;
-	mock_endstop_raw_high = true;
+	mock_endstop_raw_high = false;
 	mock_endstop_triggered = false;
 	mock_stop_calls = 0U;
 	mock_fault_calls[0] = 0U;
@@ -293,7 +293,7 @@ static int test_tilt_state_and_commissioning(void)
 		"TARGET=0 TIMEOUT=0 HOMED=1 HOMING=0 HOME_STATUS=SUCCESS "
 		"JOGGING=0 DIR_CHECKING=0 DIR_CALIBRATED=0 MIN_LIMIT=0 "
 		"MAX_CONFIGURED=0 MAX_LIMIT=0\r\n"
-		"OK TILT ENDSTOP=0 RAW=1\r\n"
+		"OK TILT ENDSTOP=0 RAW=0\r\n"
 		"OK TILT HOMING\r\nOK TILT JOGGING\r\n"
 		"OK TILT DIR_CHECKING\r\n";
 

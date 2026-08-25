@@ -41,8 +41,8 @@ int main(void)
 			  "TILT enable remains active-low PB1");
 	failures += check(BOARD_TILT_ENDSTOP_GPIO_PORT == BOARD_GPIO_PORT_C &&
 			  BOARD_TILT_ENDSTOP_PIN_NUMBER == 2U &&
-			  BOARD_TILT_ENDSTOP_ACTIVE_LOW == 1U,
-			  "TILT Z-endstop is active-low PC2");
+			  BOARD_TILT_ENDSTOP_ACTIVE_LOW == 0U,
+			  "TILT Z-endstop is hardware-validated active-high PC2");
 	failures += check(BOARD_TILT_DIRECTION_CALIBRATED == 0U,
 			  "TILT direction remains gated until physical validation");
 	failures += check(BOARD_TMC_UART_TX_GPIO_PORT == BOARD_GPIO_PORT_C &&
