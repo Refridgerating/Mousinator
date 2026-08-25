@@ -421,12 +421,15 @@ PC5 LOW rotates CCW toward home, while PC5 HIGH rotates CW away from home.
 Logical negative motion and HOME therefore use LOW; logical positive motion
 uses HIGH. Raw `DIR-CHECK TILT` commands are rejected once calibrated.
 
-Homing is asynchronous and bounded: release if initially triggered, approach
-at 150 steps/s, back off at 50 steps/s, and re-approach at 50 steps/s. The fast
-search stops after 1000 external STEP edges and each release/re-approach phase
-is bounded to 50 edges. A raw trigger immediately suppresses further negative
-edges; five stable 1 kHz samples qualify trigger and release. Success sets TILT
-position exactly to zero and leaves the motor enabled.
+Homing is asynchronous and bounded. An initially active switch is released at
+100 steps/s, then the first negative approach runs at 500 steps/s with an 8000
+external-STEP search limit. After first contact, TILT moves positive at 100
+steps/s until release is stable, with a 500-step release-search bound, then
+moves 100 additional clearance steps before stopping and re-approaching at 100
+steps/s. The slow re-approach is bounded to 600 steps. A raw trigger immediately
+suppresses further negative edges; five stable 1 kHz samples qualify trigger
+and release. The second stable trigger sets position exactly zero and leaves
+the motor enabled and homed.
 
 There is intentionally no positive TILT software maximum in this M4 build.
 `STATE? TILT` reports `MAX_CONFIGURED=0 MAX_LIMIT=0`. Use only repeated bounded
@@ -798,16 +801,14 @@ Use this staged physical workflow:
 ```bash
 python3 host/sentry_mcu.py --device <device> configure-drivers
 python3 host/sentry_mcu.py --device <device> endstop
-# Manually press and release PC2 and confirm ENDSTOP/RAW invert.
-python3 host/sentry_mcu.py --device <device> tilt-dir-check --level high
-python3 host/sentry_mcu.py --device <device> tilt-dir-check --level low
-# Compile the observed clockwise level into board.h, flash again, then:
+# Confirm released is ENDSTOP=0 RAW=0 and pressed is ENDSTOP=1 RAW=1.
 python3 host/sentry_mcu.py --device <device> home-tilt
 python3 host/sentry_mcu.py --device <device> jog-tilt --steps 50
 ```
 
-Start near the home switch, use short movement, and do not run HOME until both
-the switch state and clockwise PC5 level have been physically established.
+The calibrated HOME search is bounded to 8000 steps (approximately 20 mm at
+400 external steps/mm). Keep immediate access to power disconnect, and do not
+run HOME unless the switch state and direction have been physically verified.
 
 Future USB-based firmware updates may be investigated later.
 

@@ -100,22 +100,52 @@ static void update_home(tilt_reference_state_t *reference,
 {
 	switch (reference->home_phase) {
 	case TILT_HOME_PHASE_INITIAL_RELEASE:
-	case TILT_HOME_PHASE_BACKOFF:
 		if (release_is_stable(reference)) {
 			axis_motion_force_stop(axis);
-			reference->home_phase =
-				reference->home_phase == TILT_HOME_PHASE_INITIAL_RELEASE ?
-					TILT_HOME_PHASE_FAST_APPROACH :
-					TILT_HOME_PHASE_SLOW_APPROACH;
+			reference->home_phase = TILT_HOME_PHASE_FAST_APPROACH;
 			reference->phase_steps = 0U;
 			return;
 		}
-		if (reference->phase_steps >= TILT_HOME_BACKOFF_STEPS) {
+		if (reference->phase_steps >=
+		    TILT_HOME_RELEASE_SEARCH_MAX_STEPS) {
 			axis_motion_force_stop(axis);
 			if (endstop_triggered) {
 				fail_home(reference, axis,
 					  TILT_HOME_STATUS_SWITCH_STUCK);
 			}
+			return;
+		}
+		axis_motion_set_internal_velocity(
+			axis, TILT_HOME_SLOW_VELOCITY_STEPS_S);
+		break;
+
+	case TILT_HOME_PHASE_RELEASE_SEARCH:
+		if (release_is_stable(reference)) {
+			axis_motion_force_stop(axis);
+			reference->home_phase =
+				TILT_HOME_PHASE_POST_RELEASE_CLEARANCE;
+			reference->phase_steps = 0U;
+			return;
+		}
+		if (reference->phase_steps >=
+		    TILT_HOME_RELEASE_SEARCH_MAX_STEPS) {
+			axis_motion_force_stop(axis);
+			if (endstop_triggered) {
+				fail_home(reference, axis,
+					  TILT_HOME_STATUS_SWITCH_STUCK);
+			}
+			return;
+		}
+		axis_motion_set_internal_velocity(
+			axis, TILT_HOME_SLOW_VELOCITY_STEPS_S);
+		break;
+
+	case TILT_HOME_PHASE_POST_RELEASE_CLEARANCE:
+		if (reference->phase_steps >=
+		    TILT_HOME_POST_RELEASE_CLEARANCE_STEPS) {
+			axis_motion_force_stop(axis);
+			reference->home_phase = TILT_HOME_PHASE_SLOW_APPROACH;
+			reference->phase_steps = 0U;
 			return;
 		}
 		axis_motion_set_internal_velocity(
@@ -131,7 +161,7 @@ static void update_home(tilt_reference_state_t *reference,
 				if (reference->home_phase ==
 				    TILT_HOME_PHASE_FAST_APPROACH) {
 					reference->home_phase =
-						TILT_HOME_PHASE_BACKOFF;
+						TILT_HOME_PHASE_RELEASE_SEARCH;
 					reference->phase_steps = 0U;
 				} else {
 					axis_motion_set_position(axis, 0);
@@ -149,7 +179,8 @@ static void update_home(tilt_reference_state_t *reference,
 		if (reference->phase_steps >=
 		    (reference->home_phase == TILT_HOME_PHASE_FAST_APPROACH ?
 			     TILT_HOME_MAX_TRAVEL_STEPS :
-			     TILT_HOME_BACKOFF_STEPS)) {
+			     TILT_HOME_RELEASE_SEARCH_MAX_STEPS +
+				     TILT_HOME_POST_RELEASE_CLEARANCE_STEPS)) {
 			fail_home(reference, axis, TILT_HOME_STATUS_NOT_FOUND);
 			return;
 		}

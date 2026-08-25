@@ -52,31 +52,78 @@ static void init_enabled(axis_motion_state_t *axis,
 	tilt_reference_init(reference);
 }
 
+static int test_commissioning_constants(void)
+{
+	int failures = 0;
+
+	failures += check(TILT_HOME_FAST_VELOCITY_STEPS_S == 500,
+			  "fast home velocity is 500 steps/s");
+	failures += check(TILT_HOME_SLOW_VELOCITY_STEPS_S == 100,
+			  "slow home velocity is 100 steps/s");
+	failures += check(TILT_HOME_MAX_TRAVEL_STEPS == 8000U,
+			  "fast home search is bounded at 8000 steps");
+	failures += check(TILT_HOME_RELEASE_SEARCH_MAX_STEPS == 500U,
+			  "release search is bounded at 500 steps");
+	failures += check(TILT_HOME_POST_RELEASE_CLEARANCE_STEPS == 100U,
+			  "post-release clearance is exactly 100 steps");
+	failures += check(TILT_ENDSTOP_STABLE_TICKS == 5U,
+			  "endstop qualification remains five control ticks");
+	return failures;
+}
+
 static int test_successful_home(void)
 {
 	axis_motion_state_t axis;
 	tilt_reference_state_t reference;
+	int64_t clearance_start_position;
+	int64_t release_search_start_position;
 	uint32_t index;
 	int failures = 0;
 
 	init_enabled(&axis, &reference);
 	tilt_reference_start_home(&reference, false);
-	failures += check(run_until_steps(&reference, &axis, false, 20U) == 20U &&
-				  axis.position_steps < 0,
-			  "fast home approach moves negative");
-	for (index = 0U; index < TILT_ENDSTOP_STABLE_TICKS; ++index) {
+	failures += check(run_until_steps(&reference, &axis, false, 1500U) ==
+				  1500U && axis.position_steps == -1500 &&
+				  reference.home_phase ==
+					  TILT_HOME_PHASE_FAST_APPROACH,
+			  "fast home search succeeds beyond the old 1000-step bound");
+	(void)run_tick(&reference, &axis, true);
+	failures += check(axis.position_steps == -1500 &&
+				  axis.current_velocity_steps_s == 0,
+			  "raw first trigger immediately suppresses negative edges");
+	for (index = 1U; index < TILT_ENDSTOP_STABLE_TICKS; ++index) {
 		(void)run_tick(&reference, &axis, true);
 	}
-	failures += check(reference.home_phase == TILT_HOME_PHASE_BACKOFF &&
+	failures += check(reference.home_phase ==
+				  TILT_HOME_PHASE_RELEASE_SEARCH &&
 				  axis.current_velocity_steps_s == 0,
-			  "trigger immediately stops and enters backoff");
-	failures += check(run_until_steps(&reference, &axis, true, 5U) == 5U,
-			  "backoff moves positive while switch is active");
+			  "first trigger immediately stops and starts release search");
+	release_search_start_position = axis.position_steps;
+	failures += check(run_until_steps(&reference, &axis, true, 75U) == 75U &&
+				  axis.position_steps ==
+					  release_search_start_position + 75,
+			  "release search remains active beyond 50 steps");
 	for (index = 0U; index < TILT_ENDSTOP_STABLE_TICKS; ++index) {
 		(void)run_tick(&reference, &axis, false);
 	}
-	failures += check(reference.home_phase == TILT_HOME_PHASE_SLOW_APPROACH,
-			  "stable release starts slow re-approach");
+	failures += check(reference.home_phase ==
+				  TILT_HOME_PHASE_POST_RELEASE_CLEARANCE,
+			  "stable release starts post-release clearance");
+	clearance_start_position = axis.position_steps;
+	failures += check(run_until_steps(&reference, &axis, false,
+					 TILT_HOME_POST_RELEASE_CLEARANCE_STEPS) ==
+				  TILT_HOME_POST_RELEASE_CLEARANCE_STEPS &&
+				  axis.position_steps == clearance_start_position +
+					  TILT_HOME_POST_RELEASE_CLEARANCE_STEPS,
+			  "stable release is followed by exactly 100 clearance steps");
+	(void)run_tick(&reference, &axis, false);
+	failures += check(reference.home_phase == TILT_HOME_PHASE_SLOW_APPROACH &&
+				  axis.current_velocity_steps_s == 0,
+			  "clearance completion stops before slow re-approach");
+	(void)run_tick(&reference, &axis, false);
+	failures += check(axis.target_velocity_steps_s ==
+				  -TILT_HOME_SLOW_VELOCITY_STEPS_S,
+			  "second approach uses configured slow negative velocity");
 	(void)run_until_steps(&reference, &axis, false, 3U);
 	for (index = 0U; index < TILT_ENDSTOP_STABLE_TICKS; ++index) {
 		(void)run_tick(&reference, &axis, true);
@@ -101,7 +148,7 @@ static int test_triggered_start_and_failure(void)
 				  TILT_HOME_PHASE_INITIAL_RELEASE,
 			  "active-at-start switch backs off first");
 	(void)run_until_steps(&reference, &axis, true,
-			      TILT_HOME_BACKOFF_STEPS);
+			      TILT_HOME_RELEASE_SEARCH_MAX_STEPS);
 	(void)run_tick(&reference, &axis, true);
 	failures += check(reference.home_status ==
 				  TILT_HOME_STATUS_SWITCH_STUCK &&
@@ -124,6 +171,33 @@ static int test_triggered_start_and_failure(void)
 	}
 	failures += check(reference.home_phase == TILT_HOME_PHASE_FAST_APPROACH,
 			  "released active-at-start switch proceeds to fast seek");
+	return failures;
+}
+
+static int test_post_trigger_release_failure(void)
+{
+	axis_motion_state_t axis;
+	tilt_reference_state_t reference;
+	uint32_t index;
+	int failures = 0;
+
+	init_enabled(&axis, &reference);
+	tilt_reference_start_home(&reference, false);
+	(void)run_until_steps(&reference, &axis, false, 20U);
+	for (index = 0U; index < TILT_ENDSTOP_STABLE_TICKS; ++index) {
+		(void)run_tick(&reference, &axis, true);
+	}
+	failures += check(reference.home_phase ==
+				  TILT_HOME_PHASE_RELEASE_SEARCH,
+			  "first trigger enters bounded release search");
+	(void)run_until_steps(&reference, &axis, true,
+			      TILT_HOME_RELEASE_SEARCH_MAX_STEPS);
+	(void)run_tick(&reference, &axis, true);
+	failures += check(reference.home_status ==
+				  TILT_HOME_STATUS_SWITCH_STUCK &&
+				  reference.operation == TILT_OPERATION_IDLE &&
+				  !reference.homed && reference.disable_requested,
+			  "switch still active after 500 release steps fails stuck");
 	return failures;
 }
 
@@ -257,8 +331,10 @@ int main(void)
 {
 	int failures = 0;
 
+	failures += test_commissioning_constants();
 	failures += test_successful_home();
 	failures += test_triggered_start_and_failure();
+	failures += test_post_trigger_release_failure();
 	failures += test_exact_jog_and_minimum();
 	failures += test_normal_endstop_and_direction_check();
 	failures += test_home_does_not_modify_pan();
