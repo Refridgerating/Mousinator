@@ -8,14 +8,15 @@
 #include <libopencm3/stm32/rcc.h>
 #include <libopencm3/stm32/timer.h>
 
-#define CONTROL_TIMER TIM4
-#define CONTROL_TIMER_PRESCALER 71U
-#define CONTROL_TIMER_PERIOD 999U
-#define CONTROL_TIMER_IRQ_PRIORITY 0x40U
+#define MOTION_SCHEDULER_TIMER TIM4
+#define MOTION_SCHEDULER_TIMER_PRESCALER 71U
+#define MOTION_SCHEDULER_TIMER_PERIOD 49U
+#define MOTION_SCHEDULER_TIMER_IRQ_PRIORITY 0x40U
 
 static axis_motion_state_t pan_state;
 static axis_motion_state_t tilt_state;
 static tilt_reference_state_t tilt_reference;
+static uint8_t scheduler_ticks_until_control;
 
 static void control_irq_disable(void)
 {
@@ -96,25 +97,31 @@ static motion_velocity_result_t validate_tilt_velocity(int32_t velocity_steps_s)
 
 void motion_controller_init(void)
 {
-	axis_motion_init(&pan_state);
-	axis_motion_init(&tilt_state);
+	axis_motion_init(&pan_state, PAN_MAX_ABSOLUTE_VELOCITY_STEPS_S);
+	axis_motion_init(&tilt_state, TILT_MAX_ABSOLUTE_VELOCITY_STEPS_S);
 	tilt_reference_init(&tilt_reference);
+	scheduler_ticks_until_control =
+		(uint8_t)MOTION_SCHEDULER_TICKS_PER_CONTROL_TICK;
 	stepper_pan_init();
 	stepper_tilt_init();
 
-	/* APB1 timers receive 72 MHz; PSC=71 and ARR=999 produce 1 kHz. */
+	/* APB1 timers receive 72 MHz; PSC=71 and ARR=49 produce 20 kHz. */
 	rcc_periph_clock_enable(RCC_TIM4);
 	rcc_periph_reset_pulse(RST_TIM4);
-	timer_set_mode(CONTROL_TIMER, TIM_CR1_CKD_CK_INT, TIM_CR1_CMS_EDGE,
+	timer_set_mode(MOTION_SCHEDULER_TIMER, TIM_CR1_CKD_CK_INT,
+		       TIM_CR1_CMS_EDGE,
 		       TIM_CR1_DIR_UP);
-	timer_set_prescaler(CONTROL_TIMER, CONTROL_TIMER_PRESCALER);
-	timer_set_period(CONTROL_TIMER, CONTROL_TIMER_PERIOD);
-	timer_generate_event(CONTROL_TIMER, TIM_EGR_UG);
-	timer_clear_flag(CONTROL_TIMER, TIM_SR_UIF);
-	timer_enable_irq(CONTROL_TIMER, TIM_DIER_UIE);
-	nvic_set_priority(NVIC_TIM4_IRQ, CONTROL_TIMER_IRQ_PRIORITY);
+	timer_set_prescaler(MOTION_SCHEDULER_TIMER,
+			    MOTION_SCHEDULER_TIMER_PRESCALER);
+	timer_set_period(MOTION_SCHEDULER_TIMER,
+			 MOTION_SCHEDULER_TIMER_PERIOD);
+	timer_generate_event(MOTION_SCHEDULER_TIMER, TIM_EGR_UG);
+	timer_clear_flag(MOTION_SCHEDULER_TIMER, TIM_SR_UIF);
+	timer_enable_irq(MOTION_SCHEDULER_TIMER, TIM_DIER_UIE);
+	nvic_set_priority(NVIC_TIM4_IRQ,
+			  MOTION_SCHEDULER_TIMER_IRQ_PRIORITY);
 	control_irq_enable();
-	timer_enable_counter(CONTROL_TIMER);
+	timer_enable_counter(MOTION_SCHEDULER_TIMER);
 }
 
 motion_enable_result_t motion_controller_enable(motion_axis_t axis)
@@ -183,12 +190,12 @@ motion_dual_velocity_result_t motion_controller_set_both_velocities(
 	control_irq_disable();
 	/* Range-check both arguments before considering either axis state. */
 	result.pan_result =
-		((pan_velocity_steps_s > AXIS_MAX_ABSOLUTE_VELOCITY_STEPS_S) ||
-		 (pan_velocity_steps_s < -AXIS_MAX_ABSOLUTE_VELOCITY_STEPS_S)) ?
+		((pan_velocity_steps_s > PAN_MAX_ABSOLUTE_VELOCITY_STEPS_S) ||
+		 (pan_velocity_steps_s < -PAN_MAX_ABSOLUTE_VELOCITY_STEPS_S)) ?
 			MOTION_VELOCITY_RANGE : MOTION_VELOCITY_OK;
 	result.tilt_result =
-		((tilt_velocity_steps_s > AXIS_MAX_ABSOLUTE_VELOCITY_STEPS_S) ||
-		 (tilt_velocity_steps_s < -AXIS_MAX_ABSOLUTE_VELOCITY_STEPS_S)) ?
+		((tilt_velocity_steps_s > TILT_MAX_ABSOLUTE_VELOCITY_STEPS_S) ||
+		 (tilt_velocity_steps_s < -TILT_MAX_ABSOLUTE_VELOCITY_STEPS_S)) ?
 			MOTION_VELOCITY_RANGE : MOTION_VELOCITY_OK;
 	result.applied = false;
 	if ((result.pan_result != MOTION_VELOCITY_OK) ||
@@ -367,55 +374,66 @@ void motion_controller_driver_fault(motion_axis_t axis)
 
 void tim4_isr(void)
 {
-	axis_motion_tick_result_t pan_result;
-	axis_motion_tick_result_t tilt_result;
-	const bool endstop_triggered = board_tilt_endstop_triggered();
+	axis_motion_control_result_t pan_control;
+	axis_motion_control_result_t tilt_control;
+	bool endstop_triggered;
+	bool pan_emit_step;
+	bool tilt_emit_step;
 
-	if (!timer_get_flag(CONTROL_TIMER, TIM_SR_UIF)) {
+	if (!timer_get_flag(MOTION_SCHEDULER_TIMER, TIM_SR_UIF)) {
 		return;
 	}
-	timer_clear_flag(CONTROL_TIMER, TIM_SR_UIF);
+	timer_clear_flag(MOTION_SCHEDULER_TIMER, TIM_SR_UIF);
+	endstop_triggered = board_tilt_endstop_triggered();
 
-	tilt_reference_before_tick(&tilt_reference, &tilt_state,
-				   endstop_triggered);
-	pan_result = axis_motion_tick(&pan_state);
-	tilt_result = axis_motion_tick(&tilt_state);
+	--scheduler_ticks_until_control;
+	if (scheduler_ticks_until_control == 0U) {
+		scheduler_ticks_until_control =
+			(uint8_t)MOTION_SCHEDULER_TICKS_PER_CONTROL_TICK;
+		tilt_reference_before_tick(&tilt_reference, &tilt_state,
+					   endstop_triggered);
+		pan_control = axis_motion_control_tick(&pan_state);
+		tilt_control = axis_motion_control_tick(&tilt_state);
 
-	if (pan_result.direction_changed) {
-		stepper_pan_set_direction(pan_result.direction_positive);
-	}
-	if (tilt_result.direction_changed) {
-		if (tilt_reference.operation ==
-		    TILT_OPERATION_DIRECTION_CHECKING) {
-			stepper_tilt_set_direction_raw(
-				tilt_reference.direction_check_high);
-		} else {
-			stepper_tilt_set_direction(
-				tilt_result.direction_positive);
+		if (pan_control.direction_changed) {
+			stepper_pan_set_direction(pan_control.direction_positive);
+		}
+		if (tilt_control.direction_changed) {
+			if (tilt_reference.operation ==
+			    TILT_OPERATION_DIRECTION_CHECKING) {
+				stepper_tilt_set_direction_raw(
+					tilt_reference.direction_check_high);
+			} else {
+				stepper_tilt_set_direction(
+					tilt_control.direction_positive);
+			}
+		}
+		if (pan_control.disable_driver) {
+			stepper_pan_set_enabled(false);
+		}
+		if (tilt_control.disable_driver) {
+			stepper_tilt_set_enabled(false);
+		}
+		if (tilt_reference_take_disable_request(&tilt_reference)) {
+			if (axis_motion_request_disable(&tilt_state) ==
+			    AXIS_DISABLE_COMPLETE) {
+				stepper_tilt_set_enabled(false);
+			}
 		}
 	}
-	if (pan_result.emit_step) {
+
+	pan_emit_step = axis_motion_scheduler_tick(&pan_state);
+	tilt_emit_step = axis_motion_scheduler_tick(&tilt_state);
+	if (pan_emit_step) {
 		axis_motion_commit_step(&pan_state);
 		stepper_pan_emit_pulse();
 	}
-	if (tilt_result.emit_step &&
+	if (tilt_emit_step &&
 	    tilt_reference_allow_step(&tilt_reference, &tilt_state,
 				      endstop_triggered)) {
 		axis_motion_commit_step(&tilt_state);
 		stepper_tilt_emit_pulse();
 		tilt_reference_step_committed(&tilt_reference, &tilt_state,
 					      endstop_triggered);
-	}
-	if (pan_result.disable_driver) {
-		stepper_pan_set_enabled(false);
-	}
-	if (tilt_result.disable_driver) {
-		stepper_tilt_set_enabled(false);
-	}
-	if (tilt_reference_take_disable_request(&tilt_reference)) {
-		if (axis_motion_request_disable(&tilt_state) ==
-		    AXIS_DISABLE_COMPLETE) {
-			stepper_tilt_set_enabled(false);
-		}
 	}
 }

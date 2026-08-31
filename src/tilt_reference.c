@@ -116,7 +116,7 @@ static void update_home(tilt_reference_state_t *reference,
 			return;
 		}
 		axis_motion_set_internal_velocity(
-			axis, TILT_HOME_SLOW_VELOCITY_STEPS_S);
+			axis, TILT_HOME_BACKOFF_VELOCITY_STEPS_S);
 		break;
 
 	case TILT_HOME_PHASE_RELEASE_SEARCH:
@@ -137,7 +137,7 @@ static void update_home(tilt_reference_state_t *reference,
 			return;
 		}
 		axis_motion_set_internal_velocity(
-			axis, TILT_HOME_SLOW_VELOCITY_STEPS_S);
+			axis, TILT_HOME_BACKOFF_VELOCITY_STEPS_S);
 		break;
 
 	case TILT_HOME_PHASE_POST_RELEASE_CLEARANCE:
@@ -149,7 +149,7 @@ static void update_home(tilt_reference_state_t *reference,
 			return;
 		}
 		axis_motion_set_internal_velocity(
-			axis, TILT_HOME_SLOW_VELOCITY_STEPS_S);
+			axis, TILT_HOME_BACKOFF_VELOCITY_STEPS_S);
 		break;
 
 	case TILT_HOME_PHASE_FAST_APPROACH:
@@ -165,12 +165,9 @@ static void update_home(tilt_reference_state_t *reference,
 					reference->phase_steps = 0U;
 				} else {
 					axis_motion_set_position(axis, 0);
-					reference->operation = TILT_OPERATION_IDLE;
 					reference->home_phase =
-						TILT_HOME_PHASE_NONE;
-					reference->home_status =
-						TILT_HOME_STATUS_SUCCESS;
-					reference->homed = true;
+						TILT_HOME_PHASE_POST_HOME_PARK;
+					reference->phase_steps = 0U;
 					reference->min_limit = true;
 				}
 			}
@@ -188,6 +185,20 @@ static void update_home(tilt_reference_state_t *reference,
 			axis, reference->home_phase == TILT_HOME_PHASE_FAST_APPROACH ?
 				      -TILT_HOME_FAST_VELOCITY_STEPS_S :
 				      -TILT_HOME_SLOW_VELOCITY_STEPS_S);
+		break;
+
+	case TILT_HOME_PHASE_POST_HOME_PARK:
+		if (reference->phase_steps >= TILT_HOME_POST_HOME_PARK_STEPS) {
+			axis_motion_force_stop(axis);
+			reference->operation = TILT_OPERATION_IDLE;
+			reference->home_phase = TILT_HOME_PHASE_NONE;
+			reference->home_status = TILT_HOME_STATUS_SUCCESS;
+			reference->homed = true;
+			reference->min_limit = false;
+			return;
+		}
+		axis_motion_set_internal_velocity(
+			axis, TILT_HOME_POST_HOME_VELOCITY_STEPS_S);
 		break;
 
 	case TILT_HOME_PHASE_NONE:
@@ -263,6 +274,45 @@ bool tilt_reference_allow_step(const tilt_reference_state_t *reference,
 	    (axis->position_steps <= 0)) {
 		return false;
 	}
+	if (reference->operation == TILT_OPERATION_HOMING) {
+		switch (reference->home_phase) {
+		case TILT_HOME_PHASE_INITIAL_RELEASE:
+		case TILT_HOME_PHASE_RELEASE_SEARCH:
+			if (reference->phase_steps >=
+			    TILT_HOME_RELEASE_SEARCH_MAX_STEPS) {
+				return false;
+			}
+			break;
+		case TILT_HOME_PHASE_FAST_APPROACH:
+			if (reference->phase_steps >=
+			    TILT_HOME_MAX_TRAVEL_STEPS) {
+				return false;
+			}
+			break;
+		case TILT_HOME_PHASE_POST_RELEASE_CLEARANCE:
+			if (reference->phase_steps >=
+			    TILT_HOME_POST_RELEASE_CLEARANCE_STEPS) {
+				return false;
+			}
+			break;
+		case TILT_HOME_PHASE_SLOW_APPROACH:
+			if (reference->phase_steps >=
+			    TILT_HOME_RELEASE_SEARCH_MAX_STEPS +
+				    TILT_HOME_POST_RELEASE_CLEARANCE_STEPS) {
+				return false;
+			}
+			break;
+		case TILT_HOME_PHASE_POST_HOME_PARK:
+			if (reference->phase_steps >=
+			    TILT_HOME_POST_HOME_PARK_STEPS) {
+				return false;
+			}
+			break;
+		case TILT_HOME_PHASE_NONE:
+		default:
+			break;
+		}
+	}
 	if (((reference->operation == TILT_OPERATION_JOGGING) ||
 	     (reference->operation == TILT_OPERATION_DIRECTION_CHECKING)) &&
 	    (reference->operation_steps_remaining == 0U)) {
@@ -295,7 +345,8 @@ void tilt_reference_step_committed(tilt_reference_state_t *reference,
 			}
 		}
 	}
-	if (reference->homed) {
+	if (reference->homed ||
+	    (reference->home_phase == TILT_HOME_PHASE_POST_HOME_PARK)) {
 		reference->min_limit = axis->position_steps == 0;
 	}
 }

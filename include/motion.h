@@ -4,9 +4,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define AXIS_MAX_ABSOLUTE_VELOCITY_STEPS_S 1000
+#define PAN_MAX_ABSOLUTE_VELOCITY_STEPS_S 10000
+#define TILT_MAX_ABSOLUTE_VELOCITY_STEPS_S 5000
 #define AXIS_ACCELERATION_STEPS_S2 2000U
 #define MOTION_CONTROL_FREQUENCY_HZ 1000U
+#define MOTION_SCHEDULER_FREQUENCY_HZ 20000U
+#define MOTION_SCHEDULER_TICKS_PER_CONTROL_TICK 20U
 #define MOTION_VELOCITY_DELTA_PER_TICK 2
 #define MOTION_COMMAND_LEASE_TICKS 1000U
 
@@ -15,10 +18,24 @@
 #error "control tick must represent the configured acceleration exactly"
 #endif
 
+#if ((MOTION_CONTROL_FREQUENCY_HZ * \
+	MOTION_SCHEDULER_TICKS_PER_CONTROL_TICK) != \
+	MOTION_SCHEDULER_FREQUENCY_HZ)
+#error "scheduler divider must represent the control frequency exactly"
+#endif
+
+#if ((PAN_MAX_ABSOLUTE_VELOCITY_STEPS_S > \
+	MOTION_SCHEDULER_FREQUENCY_HZ) || \
+	(TILT_MAX_ABSOLUTE_VELOCITY_STEPS_S > \
+	MOTION_SCHEDULER_FREQUENCY_HZ))
+#error "axis velocity limits must not exceed scheduler capacity"
+#endif
+
 typedef struct {
 	int64_t position_steps;
 	int32_t target_velocity_steps_s;
 	int32_t current_velocity_steps_s;
+	int32_t max_absolute_velocity_steps_s;
 	uint32_t phase_accumulator;
 	uint32_t lease_ticks_remaining;
 	bool enabled;
@@ -41,13 +58,13 @@ typedef enum {
 } axis_velocity_result_t;
 
 typedef struct {
-	bool emit_step;
 	bool direction_changed;
 	bool direction_positive;
 	bool disable_driver;
-} axis_motion_tick_result_t;
+} axis_motion_control_result_t;
 
-void axis_motion_init(axis_motion_state_t *state);
+void axis_motion_init(axis_motion_state_t *state,
+		      int32_t max_absolute_velocity_steps_s);
 void axis_motion_enable(axis_motion_state_t *state);
 axis_disable_result_t axis_motion_request_disable(axis_motion_state_t *state);
 axis_velocity_result_t axis_motion_validate_velocity(
@@ -66,7 +83,9 @@ void axis_motion_stop(axis_motion_state_t *state);
 void axis_motion_force_stop(axis_motion_state_t *state);
 void axis_motion_set_position(axis_motion_state_t *state,
 			      int64_t position_steps);
-axis_motion_tick_result_t axis_motion_tick(axis_motion_state_t *state);
+axis_motion_control_result_t axis_motion_control_tick(
+	axis_motion_state_t *state);
+bool axis_motion_scheduler_tick(axis_motion_state_t *state);
 void axis_motion_commit_step(axis_motion_state_t *state);
 
 #endif

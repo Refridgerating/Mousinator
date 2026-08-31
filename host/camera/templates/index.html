@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sentry Camera</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 1100px; margin: 1rem auto; padding: 0 1rem; background: #111; color: #eee; }
+      h1 { margin-bottom: 0.5rem; }
+      img { display: block; width: 100%; height: auto; background: #222; border: 1px solid #555; }
+      .status { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 0.5rem; margin: 1rem 0; }
+      .status div { background: #222; padding: 0.7rem; border-radius: 0.3rem; }
+      .controls { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+      button { padding: 0.7rem 1rem; border: 0; border-radius: 0.3rem; cursor: pointer; }
+      button:hover { filter: brightness(1.15); }
+      #message { min-height: 1.5rem; color: #f6c85f; }
+    </style>
+  </head>
+  <body>
+    <h1>Sentry Camera</h1>
+    <img src="/stream" alt="Live Sentry camera stream">
+    <section class="status">
+      <div>Camera: <span id="camera">unknown</span></div>
+      <div>Resolution: <span id="resolution">unknown</span></div>
+      <div>FPS: <span id="fps">unknown</span></div>
+      <div>Recording: <span id="recording">unknown</span></div>
+      <div>Dataset capture: <span id="dataset">unknown</span></div>
+      <div>Capture interval: <span id="interval">unknown</span></div>
+    </section>
+    <div class="controls">
+      <button data-endpoint="/api/record/start">Start Recording</button>
+      <button data-endpoint="/api/record/stop">Stop Recording</button>
+      <button data-endpoint="/api/capture">Save Frame</button>
+      <button data-endpoint="/api/dataset/start">Start Dataset Capture</button>
+      <button data-endpoint="/api/dataset/stop">Stop Dataset Capture</button>
+    </div>
+    <p id="message"></p>
+    <script>
+      const message = document.getElementById("message");
+
+      function render(status) {
+        document.getElementById("camera").textContent = status.camera_running ? "running" : "stopped";
+        document.getElementById("resolution").textContent = `${status.resolution.width}×${status.resolution.height}`;
+        document.getElementById("fps").textContent = status.fps;
+        document.getElementById("recording").textContent = status.recording ? status.recording_filename : "stopped";
+        document.getElementById("dataset").textContent = status.dataset_capture_enabled ? "enabled" : "disabled";
+        document.getElementById("interval").textContent = `${status.capture_interval} s`;
+        if (status.last_error) message.textContent = status.last_error;
+      }
+
+      async function refresh() {
+        try {
+          const response = await fetch("/api/status", {cache: "no-store"});
+          render(await response.json());
+        } catch (error) {
+          message.textContent = `Status error: ${error}`;
+        }
+      }
+
+      document.querySelectorAll("button[data-endpoint]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+          try {
+            const response = await fetch(button.dataset.endpoint, {method: "POST"});
+            const payload = await response.json();
+            render(payload.status);
+            message.textContent = payload.ok ? "Command completed" : payload.error;
+          } catch (error) {
+            message.textContent = `Command error: ${error}`;
+          } finally {
+            button.disabled = false;
+          }
+        });
+      });
+
+      refresh();
+      setInterval(refresh, 1000);
+    </script>
+  </body>
+</html>

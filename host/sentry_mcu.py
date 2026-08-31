@@ -20,6 +20,8 @@ SENTRY_VID = 0x1209
 SENTRY_PID = 0x0001
 DEFAULT_BAUD = 115200
 DEFAULT_TIMEOUT_S = 1.0
+PAN_MAX_ABSOLUTE_VELOCITY_STEPS_S = 10000
+TILT_MAX_ABSOLUTE_VELOCITY_STEPS_S = 5000
 PAN_STATE_PATTERN = re.compile(
     r"^OK PAN ENABLED=(?P<enabled>[01]) DISABLING=(?P<disabling>[01]) "
     r"MOVING=(?P<moving>[01]) POS=(?P<position>-?\d+) "
@@ -419,8 +421,17 @@ def run_motor_test(
     duration_s: float,
     refresh_s: float,
 ) -> None:
-    if not 1 <= velocity <= 1000:
-        raise ValueError("motor-test velocity must be in the range 1..1000")
+    normalized_axis = axis.lower()
+    maximum_velocity = (
+        PAN_MAX_ABSOLUTE_VELOCITY_STEPS_S
+        if normalized_axis == "pan"
+        else TILT_MAX_ABSOLUTE_VELOCITY_STEPS_S
+    )
+    if not 1 <= velocity <= maximum_velocity:
+        raise ValueError(
+            f"{normalized_axis.upper()} motor-test velocity must be in the "
+            f"range 1..{maximum_velocity}"
+        )
     if duration_s <= 0.0:
         raise ValueError("motor-test duration must be positive")
     if not 0.0 < refresh_s < 1.0:
@@ -428,7 +439,6 @@ def run_motor_test(
 
     print(controller.expect_ok("PING"))
     print(controller.expect_ok("INFO"))
-    normalized_axis = axis.lower()
     prepare_axis_motor_test(controller, normalized_axis)
     if normalized_axis == "tilt":
         state = controller.state("tilt")
@@ -482,9 +492,14 @@ def run_dual_motor_test(
     duration_s: float,
     refresh_s: float,
 ) -> None:
-    for value, name in ((pan_velocity, "PAN"), (tilt_velocity, "TILT")):
-        if not 1 <= value <= 1000:
-            raise ValueError(f"{name} velocity must be in the range 1..1000")
+    for value, name, maximum in (
+        (pan_velocity, "PAN", PAN_MAX_ABSOLUTE_VELOCITY_STEPS_S),
+        (tilt_velocity, "TILT", TILT_MAX_ABSOLUTE_VELOCITY_STEPS_S),
+    ):
+        if not 1 <= value <= maximum:
+            raise ValueError(
+                f"{name} velocity must be in the range 1..{maximum}"
+            )
     if duration_s <= 0.0 or not 0.0 < refresh_s < 1.0:
         raise ValueError("duration/refresh values are outside safe bounds")
 

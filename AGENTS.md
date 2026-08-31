@@ -2,7 +2,8 @@
 
 ## Purpose
 
-This repository contains the custom embedded firmware for the Sentry motion-control subsystem.
+This repository contains the custom embedded firmware for the Sentry
+motion-control subsystem and a narrowly scoped Raspberry Pi camera service.
 
 The immediate target hardware is:
 
@@ -23,13 +24,16 @@ The Raspberry Pi performs perception, object detection, tracking, target selecti
 
 The STM32 performs real-time motor control, step generation, local safety handling, motor-driver configuration, and hardware state reporting.
 
-Do not expand this repository into the rest of the Sentry system.
+Do not expand this repository into the rest of the Sentry system beyond the
+explicit camera acquisition, local streaming, recording, and dataset-capture
+service under `host/camera/`.
 
 ---
 
 # Current Scope
 
-Develop only the SKR Mini E3 V2.0 firmware and the minimum host-side utilities required to test it.
+Develop only the SKR Mini E3 V2.0 firmware, minimum host-side utilities required
+to test it, and the isolated Raspberry Pi camera service described below.
 
 Primary responsibilities:
 
@@ -48,14 +52,16 @@ Primary responsibilities:
 13. Telemetry
 14. Firmware build support
 15. Minimal host test utilities
+16. Raspberry Pi CSI camera acquisition
+17. Local MJPEG camera viewing and controls
+18. Camera recording and raw dataset frame collection
 
 Do not implement:
 
 - YOLO
-- camera handling
 - object detection
 - object tracking
-- web interfaces
+- web interfaces unrelated to the local camera service
 - Moonraker
 - Klipper host software
 - Marlin
@@ -66,6 +72,10 @@ Do not implement:
 - bed control
 - autonomous target-selection logic
 - Sentry application UI
+
+The camera exception is limited to `host/camera/` and its tests and
+documentation. It must use a single camera owner, must not send MCU motion
+commands, and must remain usable without YOLO or tracking code.
 
 ---
 
@@ -1068,7 +1078,8 @@ Do not remove communication-loss handling once implemented.
 
 Do not replace the BTT bootloader.
 
-Do not modify unrelated Sentry repositories or host application code.
+Do not modify unrelated Sentry repositories or host application code outside
+the explicitly authorized `host/camera/` subsystem.
 
 Do not add printer functionality merely because upstream examples contain it.
 
@@ -1135,3 +1146,7 @@ M0, M1, and M2 have physically passed. M3 is implemented/build-verified and
 awaits M3-A/M3-B physical validation and correction. Do not begin TILT motion,
 homing, M4, or later milestones until M3 has been physically tested and
 further work is explicitly requested.
+
+The Raspberry Pi camera service is an independent authorized workstream. Camera
+changes must not modify the MCU firmware, motor-control protocol, or firmware
+milestone state.

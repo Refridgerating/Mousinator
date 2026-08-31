@@ -2,7 +2,7 @@
 
 Custom motion-control firmware for the **Sentry** project, targeting the **BIGTREETECH SKR Mini E3 V2.0**.
 
-This repository repurposes the SKR Mini E3 V2.0 from a 3D-printer control board into a dedicated two-axis embedded motion controller for a computer-vision-guided pan/tilt system.
+This repository repurposes the SKR Mini E3 V2.0 from a 3D-printer control board into a dedicated two-axis embedded motion controller for a computer-vision-guided pan/tilt system. It also contains an isolated Raspberry Pi camera acquisition service for local viewing and dataset collection.
 
 The firmware is intentionally independent of Marlin, Klipper, and other printer-specific firmware.
 
@@ -40,7 +40,7 @@ Implemented behavior:
 - heater and controllable fan MOSFET outputs explicitly held OFF
 - polling-based USB CDC ACM, independent of DTR/RTS state
 - bounded text protocol supporting independent PAN/TILT motion and commissioning
-- TIM4-driven integer acceleration and independent motion-command leases
+- 20 kHz TIM4 STEP scheduling with divided 1 kHz control/state updates
 - TIM2_CH3 PAN and TIM3_CH3 TILT hardware one-shot STEP pulses
 - polling USART3 TMC2209 diagnostics and fixed, host-triggered configuration
 - PAN enable gating on a configured, nonfatal driver state
@@ -298,10 +298,10 @@ STATE?
 and disables the Y driver only after motion stops. An already stopped disable
 replies `OK PAN DISABLED`.
 
-Velocity is expressed only in raw steps per second. Zero and signed values
-from 1 through 1000 steps/s are accepted. The initial acceleration is fixed at
-2000 steps/s². These conservative M2 values validate firmware timing; they do
-not represent final mechanical calibration or performance.
+Velocity is expressed only in raw steps per second. In the hardware-validated
+M2 build, zero and signed values from 1 through 1000 steps/s were accepted.
+Acceleration remains fixed at 2000 steps/s². The current M4 limits are
+documented with the two-axis protocol below.
 
 `STATE?` has the bounded, machine-readable form:
 
@@ -412,6 +412,8 @@ Bare `STATE?` remains the M2 PAN response. `VEL BOTH` validates both complete
 commands before changing either target, and each nonzero target has its own
 1000 ms lease. `STOP` commands both axes toward zero. TILT velocity and JOG
 require a successful home; reset or `DISABLE TILT` clears the reference.
+The explicit commissioning velocity limits are 10000 steps/s for PAN and 5000
+steps/s for TILT. Commands beyond an axis limit are rejected, never clamped.
 
 The Z endstop is PC2 with an internal pull-up. The installed switch path was
 hardware-validated as LOW when released and HIGH when pressed, so it is
@@ -422,14 +424,16 @@ Logical negative motion and HOME therefore use LOW; logical positive motion
 uses HIGH. Raw `DIR-CHECK TILT` commands are rejected once calibrated.
 
 Homing is asynchronous and bounded. An initially active switch is released at
-100 steps/s, then the first negative approach runs at 500 steps/s with an 8000
-external-STEP search limit. After first contact, TILT moves positive at 100
-steps/s until release is stable, with a 500-step release-search bound, then
-moves 100 additional clearance steps before stopping and re-approaching at 100
-steps/s. The slow re-approach is bounded to 600 steps. A raw trigger immediately
-suppresses further negative edges; five stable 1 kHz samples qualify trigger
-and release. The second stable trigger sets position exactly zero and leaves
-the motor enabled and homed.
+3000 steps/s, then the first negative approach targets 4000 steps/s with a
+20000 external-STEP search limit. After first contact, TILT moves positive at
+3000 steps/s until release is stable, with a 500-step release-search bound,
+then moves exactly 100 additional clearance steps before stopping and
+re-approaching at 400 steps/s. The slow re-approach is bounded to 600 steps. A
+raw trigger immediately suppresses further negative edges at the 20 kHz
+scheduler rate; five stable 1 kHz control samples qualify trigger and release.
+The second stable trigger establishes mechanical coordinate zero, then TILT
+parks 800 positive steps at 2000 steps/s. Successful HOME therefore reports
+`HOMED=1 POS=800` while the switch reference remains position zero.
 
 There is intentionally no positive TILT software maximum in this M4 build.
 `STATE? TILT` reports `MAX_CONFIGURED=0 MAX_LIMIT=0`. Use only repeated bounded
@@ -786,9 +790,19 @@ activity. Because configuration is deliberately not persistent, repeat
 
 ## M4 Timer Architecture and Commissioning
 
-TIM4 is the only 1 kHz motion-control interrupt. It advances independent PAN
-and TILT acceleration, phase, position, command-lease, disable, and TILT
-reference state. Both axes may request one STEP edge in the same control tick.
+TIM4 is the only motion interrupt and runs at 20 kHz. Each axis has an
+independent scheduler accumulator; every interrupt adds the absolute current
+velocity, subtracts 20000 on overflow, and may start at most one hardware STEP
+one-shot per axis. PAN and TILT may emit simultaneously. This supports a
+20000-step/s architectural scheduler capacity while keeping the commissioning
+command limits lower at PAN=10000 and TILT=5000 steps/s.
+
+A counter runs acceleration, reversal, command leases, disable transitions,
+and the TILT reference state machine only once every 20 scheduler interrupts,
+preserving their validated 1 kHz semantics. Position and homing/JOG edge counts
+advance only after an external STEP edge is accepted and committed. Raw TILT
+endstop state is still checked on every scheduler interrupt. At 72 MHz, the
+20 kHz interrupt period provides approximately 3600 CPU cycles per TIM4 ISR.
 
 TIM2_CH3 remains partial-remapped to PAN PB10. TIM3 is no longer the control
 timer: default TIM3_CH3 drives TILT PB0. Both STEP timers run at 1 us resolution
@@ -806,9 +820,10 @@ python3 host/sentry_mcu.py --device <device> home-tilt
 python3 host/sentry_mcu.py --device <device> jog-tilt --steps 50
 ```
 
-The calibrated HOME search is bounded to 8000 steps (approximately 20 mm at
-400 external steps/mm). Keep immediate access to power disconnect, and do not
-run HOME unless the switch state and direction have been physically verified.
+The calibrated HOME search is bounded to 20000 steps (approximately 50 mm at
+400 external steps/mm) and finishes parked approximately 2 mm away at
+`POS=800`. Keep immediate access to power disconnect, and do not run HOME
+unless the switch state and direction have been physically verified.
 
 Future USB-based firmware updates may be investigated later.
 
@@ -875,7 +890,12 @@ sentry-mcu/
 │   └── fault.c
 │
 ├── host/
-│   └── sentry_mcu.py
+│   ├── sentry_mcu.py
+│   └── camera/
+│       ├── camera_service.py
+│       ├── picamera2_backend.py
+│       ├── storage.py
+│       └── stream_server.py
 │
 └── lib/
     └── libopencm3/
@@ -1073,23 +1093,131 @@ Do not optimize communication protocols before measurements show a real need.
 
 ---
 
+# Raspberry Pi Camera Service
+
+`host.camera` owns one Raspberry Pi CSI camera and makes its frames available to
+the local browser stream, MP4 recording, dataset capture, and future inference
+code. No browser client or dataset worker opens another camera object.
+
+The supported deployment target is Raspberry Pi OS with Picamera2/libcamera.
+Install the required system packages:
+
+```bash
+sudo apt update
+sudo apt install --no-install-recommends python3-picamera2 python3-flask python3-av python3-pil
+```
+
+Picamera2 depends on Raspberry Pi OS system libraries. If a virtual environment
+is required, create it with access to system packages:
+
+```bash
+python3 -m venv --system-site-packages .venv
+```
+
+Connect the CSI camera while the Pi is powered off. After boot, verify that the
+camera and libcamera pipeline work before starting Sentry:
+
+```bash
+rpicam-hello -t 5000
+```
+
+Start the service from the repository root:
+
+```bash
+python3 -m host.camera.stream_server
+```
+
+The default configuration is 1280x720 at 30 FPS, port 8080, a two-second
+dataset interval, and a 1 GiB minimum-free-space threshold. Override it with:
+
+```bash
+python3 -m host.camera.stream_server \
+    --host 0.0.0.0 \
+    --port 8080 \
+    --width 1280 \
+    --height 720 \
+    --fps 30 \
+    --capture-interval 2 \
+    --min-free-gb 1
+```
+
+Find the Pi's local address with:
+
+```bash
+hostname -I
+```
+
+From another device on the same network, open:
+
+```text
+http://<PI_IP>:8080/
+```
+
+The page shows the live MJPEG feed, resolution, FPS, recording state, and
+dataset-capture state. Its controls start and stop recording, save one frame,
+and start or stop interval dataset capture. Dataset capture is disabled at
+startup and takes one image immediately when enabled, then approximately one
+per configured interval without queuing missed captures.
+
+Recordings use timestamped MP4 filenames under `data/recordings/`. Starting or
+stopping recording does not restart the camera, repeated start/stop requests
+are safe, and existing files are never overwritten. A recording is refused if
+free space is below the configured threshold.
+
+Images are stored under `data/captures/raw/`, with metadata appended to
+`data/captures/capture_metadata.csv`. While no recording is active, a capture
+briefly pauses MJPEG, switches to the camera's largest still mode, captures,
+then restores video streaming. While recording, captures use the uninterrupted
+configured video frame so the MP4 is not split. Metadata records the actual
+dimensions and source mode for both cases.
+
+Manual captures are refused below the disk threshold. Interval collection
+disables itself and logs a warning when storage is low. The service never
+deletes recordings or captures automatically.
+
+The server is intentionally unauthenticated and unencrypted for local-network
+development. Do not expose port 8080 directly to the public internet. Stop the
+service with Ctrl+C or SIGTERM; active MP4 output is finalized before the
+camera and background worker are closed.
+
+## Camera CLI and HTTP API
+
+The CLI also supports `--data-dir` and `--log-level`. Run
+`python3 -m host.camera.stream_server --help` for the complete argument list.
+
+The local API is:
+
+```text
+GET  /
+GET  /stream
+GET  /api/status
+POST /api/record/start
+POST /api/record/stop
+POST /api/capture
+POST /api/dataset/start
+POST /api/dataset/stop
+```
+
+Generic camera logic can be tested without Raspberry Pi hardware:
+
+```bash
+make camera-test
+```
+
+---
+
 # Current Scope Boundary
 
-This repository contains only the embedded motion-control portion of Sentry.
+This repository contains the embedded motion-control subsystem and the isolated
+Raspberry Pi camera acquisition service documented above.
 
-Related systems such as:
+Related systems such as YOLO inference, object detection, tracking, annotated
+streaming, autonomous target selection, and the full Sentry application UI
+remain out of scope.
 
-- computer vision
-- object detection
-- tracking
-- camera control
-- web interfaces
-- user controls
-- high-level behavior
-
-belong elsewhere in the Sentry project.
-
-The firmware should expose a clean motion-control interface to those systems without depending on them.
+The firmware exposes a clean motion-control interface without depending on the
+camera service. The camera service does not send motor commands or change the
+MCU protocol.
 
 ---
 

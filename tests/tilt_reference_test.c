@@ -12,20 +12,24 @@ static int check(bool condition, const char *message)
 	return 0;
 }
 
-static bool run_tick(tilt_reference_state_t *reference,
-		     axis_motion_state_t *axis, bool triggered)
+static uint32_t run_tick(tilt_reference_state_t *reference,
+			 axis_motion_state_t *axis, bool triggered)
 {
-	axis_motion_tick_result_t tick;
+	uint32_t emitted = 0U;
+	uint32_t index;
 
 	tilt_reference_before_tick(reference, axis, triggered);
-	tick = axis_motion_tick(axis);
-	if (tick.emit_step &&
-	    tilt_reference_allow_step(reference, axis, triggered)) {
-		axis_motion_commit_step(axis);
-		tilt_reference_step_committed(reference, axis, triggered);
-		return true;
+	(void)axis_motion_control_tick(axis);
+	for (index = 0U; index <
+	     MOTION_SCHEDULER_TICKS_PER_CONTROL_TICK; ++index) {
+		if (axis_motion_scheduler_tick(axis) &&
+		    tilt_reference_allow_step(reference, axis, triggered)) {
+			axis_motion_commit_step(axis);
+			tilt_reference_step_committed(reference, axis, triggered);
+			++emitted;
+		}
 	}
-	return false;
+	return emitted;
 }
 
 static uint32_t run_until_steps(tilt_reference_state_t *reference,
@@ -36,9 +40,7 @@ static uint32_t run_until_steps(tilt_reference_state_t *reference,
 	uint32_t ticks = 0U;
 
 	while ((emitted < requested) && (ticks < 200000U)) {
-		if (run_tick(reference, axis, triggered)) {
-			++emitted;
-		}
+		emitted += run_tick(reference, axis, triggered);
 		++ticks;
 	}
 	return emitted;
@@ -47,7 +49,7 @@ static uint32_t run_until_steps(tilt_reference_state_t *reference,
 static void init_enabled(axis_motion_state_t *axis,
 			 tilt_reference_state_t *reference)
 {
-	axis_motion_init(axis);
+	axis_motion_init(axis, TILT_MAX_ABSOLUTE_VELOCITY_STEPS_S);
 	axis_motion_enable(axis);
 	tilt_reference_init(reference);
 }
@@ -56,16 +58,22 @@ static int test_commissioning_constants(void)
 {
 	int failures = 0;
 
-	failures += check(TILT_HOME_FAST_VELOCITY_STEPS_S == 500,
-			  "fast home velocity is 500 steps/s");
-	failures += check(TILT_HOME_SLOW_VELOCITY_STEPS_S == 100,
-			  "slow home velocity is 100 steps/s");
-	failures += check(TILT_HOME_MAX_TRAVEL_STEPS == 8000U,
-			  "fast home search is bounded at 8000 steps");
+	failures += check(TILT_HOME_FAST_VELOCITY_STEPS_S == 4000,
+			  "fast home velocity is 4000 steps/s");
+	failures += check(TILT_HOME_BACKOFF_VELOCITY_STEPS_S == 3000,
+			  "release and clearance velocity is 3000 steps/s");
+	failures += check(TILT_HOME_SLOW_VELOCITY_STEPS_S == 400,
+			  "slow home velocity is 400 steps/s");
+	failures += check(TILT_HOME_POST_HOME_VELOCITY_STEPS_S == 2000,
+			  "post-home park velocity is 2000 steps/s");
+	failures += check(TILT_HOME_MAX_TRAVEL_STEPS == 20000U,
+			  "fast home search is bounded at 20000 steps");
 	failures += check(TILT_HOME_RELEASE_SEARCH_MAX_STEPS == 500U,
 			  "release search is bounded at 500 steps");
 	failures += check(TILT_HOME_POST_RELEASE_CLEARANCE_STEPS == 100U,
 			  "post-release clearance is exactly 100 steps");
+	failures += check(TILT_HOME_POST_HOME_PARK_STEPS == 800U,
+			  "post-home park is exactly 800 steps");
 	failures += check(TILT_ENDSTOP_STABLE_TICKS == 5U,
 			  "endstop qualification remains five control ticks");
 	return failures;
@@ -77,21 +85,32 @@ static int test_successful_home(void)
 	tilt_reference_state_t reference;
 	int64_t clearance_start_position;
 	int64_t release_search_start_position;
+	int64_t search_position;
+	bool suppressed_scheduler_edge = false;
 	uint32_t index;
 	int failures = 0;
 
 	init_enabled(&axis, &reference);
 	tilt_reference_start_home(&reference, false);
-	failures += check(run_until_steps(&reference, &axis, false, 1500U) ==
-				  1500U && axis.position_steps == -1500 &&
+	failures += check(run_until_steps(&reference, &axis, false, 1500U) >=
+				  1500U && axis.position_steps < -1000 &&
 				  reference.home_phase ==
 					  TILT_HOME_PHASE_FAST_APPROACH,
 			  "fast home search succeeds beyond the old 1000-step bound");
-	(void)run_tick(&reference, &axis, true);
-	failures += check(axis.position_steps == -1500 &&
-				  axis.current_velocity_steps_s == 0,
-			  "raw first trigger immediately suppresses negative edges");
-	for (index = 1U; index < TILT_ENDSTOP_STABLE_TICKS; ++index) {
+	search_position = axis.position_steps;
+	for (index = 0U; index < MOTION_SCHEDULER_TICKS_PER_CONTROL_TICK;
+	     ++index) {
+		if (axis_motion_scheduler_tick(&axis)) {
+			suppressed_scheduler_edge = true;
+			if (tilt_reference_allow_step(&reference, &axis, true)) {
+				axis_motion_commit_step(&axis);
+			}
+		}
+	}
+	failures += check(suppressed_scheduler_edge &&
+				  axis.position_steps == search_position,
+			  "raw trigger suppresses negative edges before next control tick");
+	for (index = 0U; index < TILT_ENDSTOP_STABLE_TICKS; ++index) {
 		(void)run_tick(&reference, &axis, true);
 	}
 	failures += check(reference.home_phase ==
@@ -99,9 +118,13 @@ static int test_successful_home(void)
 				  axis.current_velocity_steps_s == 0,
 			  "first trigger immediately stops and starts release search");
 	release_search_start_position = axis.position_steps;
-	failures += check(run_until_steps(&reference, &axis, true, 75U) == 75U &&
+	failures += check(run_until_steps(&reference, &axis, true, 75U) >= 75U &&
 				  axis.position_steps ==
-					  release_search_start_position + 75,
+					  release_search_start_position +
+						  (int64_t)reference.phase_steps &&
+				  reference.phase_steps > 50U &&
+				  reference.phase_steps <
+					  TILT_HOME_RELEASE_SEARCH_MAX_STEPS,
 			  "release search remains active beyond 50 steps");
 	for (index = 0U; index < TILT_ENDSTOP_STABLE_TICKS; ++index) {
 		(void)run_tick(&reference, &axis, false);
@@ -128,10 +151,26 @@ static int test_successful_home(void)
 	for (index = 0U; index < TILT_ENDSTOP_STABLE_TICKS; ++index) {
 		(void)run_tick(&reference, &axis, true);
 	}
+	failures += check(!reference.homed &&
+				  reference.home_status == TILT_HOME_STATUS_RUNNING &&
+				  reference.home_phase ==
+					  TILT_HOME_PHASE_POST_HOME_PARK &&
+				  axis.position_steps == 0 && reference.min_limit,
+			  "second trigger establishes the mechanical zero reference");
+	(void)run_tick(&reference, &axis, false);
+	failures += check(axis.target_velocity_steps_s ==
+				  TILT_HOME_POST_HOME_VELOCITY_STEPS_S,
+			  "post-home park uses the configured positive velocity");
+	failures += check(run_until_steps(&reference, &axis, false,
+					 TILT_HOME_POST_HOME_PARK_STEPS) ==
+				  TILT_HOME_POST_HOME_PARK_STEPS,
+			  "post-home park commits exactly 800 positive edges");
+	(void)run_tick(&reference, &axis, false);
 	failures += check(reference.homed &&
 				  reference.home_status == TILT_HOME_STATUS_SUCCESS &&
-				  axis.position_steps == 0 && reference.min_limit,
-			  "second trigger establishes exact zero");
+				  reference.operation == TILT_OPERATION_IDLE &&
+				  axis.position_steps == 800 && !reference.min_limit,
+			  "successful HOME finishes homed at the 800-step park position");
 	return failures;
 }
 
@@ -152,6 +191,8 @@ static int test_triggered_start_and_failure(void)
 	(void)run_tick(&reference, &axis, true);
 	failures += check(reference.home_status ==
 				  TILT_HOME_STATUS_SWITCH_STUCK &&
+				  reference.phase_steps ==
+					  TILT_HOME_RELEASE_SEARCH_MAX_STEPS &&
 				  !reference.homed && reference.disable_requested,
 			  "bounded release failure leaves unhomed");
 
@@ -161,6 +202,8 @@ static int test_triggered_start_and_failure(void)
 			      TILT_HOME_MAX_TRAVEL_STEPS);
 	(void)run_tick(&reference, &axis, false);
 	failures += check(reference.home_status == TILT_HOME_STATUS_NOT_FOUND &&
+				  reference.phase_steps ==
+					  TILT_HOME_MAX_TRAVEL_STEPS &&
 				  !reference.homed,
 			  "bounded search failure leaves unhomed");
 
@@ -196,6 +239,8 @@ static int test_post_trigger_release_failure(void)
 	failures += check(reference.home_status ==
 				  TILT_HOME_STATUS_SWITCH_STUCK &&
 				  reference.operation == TILT_OPERATION_IDLE &&
+				  reference.phase_steps ==
+					  TILT_HOME_RELEASE_SEARCH_MAX_STEPS &&
 				  !reference.homed && reference.disable_requested,
 			  "switch still active after 500 release steps fails stuck");
 	return failures;
@@ -279,17 +324,22 @@ static int test_home_does_not_modify_pan(void)
 	uint32_t index;
 	int failures = 0;
 
-	axis_motion_init(&pan);
+	axis_motion_init(&pan, PAN_MAX_ABSOLUTE_VELOCITY_STEPS_S);
 	axis_motion_enable(&pan);
 	(void)axis_motion_set_target_velocity(&pan, 100);
 	init_enabled(&tilt, &reference);
 	tilt_reference_start_home(&reference, false);
 	for (index = 0U; index < 500U; ++index) {
-		axis_motion_tick_result_t pan_tick = axis_motion_tick(&pan);
+		uint32_t scheduler_tick;
 
 		(void)run_tick(&reference, &tilt, false);
-		if (pan_tick.emit_step) {
-			axis_motion_commit_step(&pan);
+		(void)axis_motion_control_tick(&pan);
+		for (scheduler_tick = 0U; scheduler_tick <
+		     MOTION_SCHEDULER_TICKS_PER_CONTROL_TICK;
+		     ++scheduler_tick) {
+			if (axis_motion_scheduler_tick(&pan)) {
+				axis_motion_commit_step(&pan);
+			}
 		}
 	}
 	pan_position_before = pan.position_steps;

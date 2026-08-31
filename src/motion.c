@@ -32,11 +32,13 @@ static void apply_velocity(axis_motion_state_t *state,
 	}
 }
 
-void axis_motion_init(axis_motion_state_t *state)
+void axis_motion_init(axis_motion_state_t *state,
+		      int32_t max_absolute_velocity_steps_s)
 {
 	state->position_steps = 0;
 	state->target_velocity_steps_s = 0;
 	state->current_velocity_steps_s = 0;
+	state->max_absolute_velocity_steps_s = max_absolute_velocity_steps_s;
 	state->phase_accumulator = 0U;
 	state->lease_ticks_remaining = 0U;
 	state->enabled = false;
@@ -79,8 +81,8 @@ axis_disable_result_t axis_motion_request_disable(axis_motion_state_t *state)
 axis_velocity_result_t axis_motion_validate_velocity(
 	const axis_motion_state_t *state, int32_t velocity_steps_s)
 {
-	if ((velocity_steps_s > AXIS_MAX_ABSOLUTE_VELOCITY_STEPS_S) ||
-	    (velocity_steps_s < -AXIS_MAX_ABSOLUTE_VELOCITY_STEPS_S)) {
+	if ((velocity_steps_s > state->max_absolute_velocity_steps_s) ||
+	    (velocity_steps_s < -state->max_absolute_velocity_steps_s)) {
 		return AXIS_VELOCITY_RANGE;
 	}
 	if (!state->enabled) {
@@ -154,16 +156,15 @@ void axis_motion_set_position(axis_motion_state_t *state,
 	state->position_steps = position_steps;
 }
 
-axis_motion_tick_result_t axis_motion_tick(axis_motion_state_t *state)
+axis_motion_control_result_t axis_motion_control_tick(
+	axis_motion_state_t *state)
 {
-	axis_motion_tick_result_t result = {
-		.emit_step = false,
+	axis_motion_control_result_t result = {
 		.direction_changed = false,
 		.direction_positive = state->direction_positive,
 		.disable_driver = false,
 	};
 	int32_t ramp_target = state->target_velocity_steps_s;
-	uint32_t absolute_velocity;
 
 	if (state->lease_ticks_remaining > 0U) {
 		--state->lease_ticks_remaining;
@@ -195,27 +196,37 @@ axis_motion_tick_result_t axis_motion_tick(axis_motion_state_t *state)
 	}
 
 	if (state->current_velocity_steps_s > 0) {
-		absolute_velocity = (uint32_t)state->current_velocity_steps_s;
 		if (!state->direction_positive) {
 			state->direction_positive = true;
 			result.direction_changed = true;
 		}
 	} else {
-		absolute_velocity = (uint32_t)(-state->current_velocity_steps_s);
 		if (state->direction_positive) {
 			state->direction_positive = false;
 			result.direction_changed = true;
 		}
 	}
 	result.direction_positive = state->direction_positive;
-
-	state->phase_accumulator += absolute_velocity;
-	if (state->phase_accumulator >= MOTION_CONTROL_FREQUENCY_HZ) {
-		state->phase_accumulator -= MOTION_CONTROL_FREQUENCY_HZ;
-		result.emit_step = true;
-	}
-
 	return result;
+}
+
+bool axis_motion_scheduler_tick(axis_motion_state_t *state)
+{
+	uint32_t absolute_velocity;
+
+	if (state->current_velocity_steps_s == 0) {
+		state->phase_accumulator = 0U;
+		return false;
+	}
+	absolute_velocity = state->current_velocity_steps_s > 0 ?
+		(uint32_t)state->current_velocity_steps_s :
+		(uint32_t)(-state->current_velocity_steps_s);
+	state->phase_accumulator += absolute_velocity;
+	if (state->phase_accumulator < MOTION_SCHEDULER_FREQUENCY_HZ) {
+		return false;
+	}
+	state->phase_accumulator -= MOTION_SCHEDULER_FREQUENCY_HZ;
+	return true;
 }
 
 void axis_motion_commit_step(axis_motion_state_t *state)
