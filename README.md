@@ -891,11 +891,16 @@ sentry-mcu/
 │
 ├── host/
 │   ├── sentry_mcu.py
-│   └── camera/
-│       ├── camera_service.py
-│       ├── picamera2_backend.py
-│       ├── storage.py
-│       └── stream_server.py
+│   ├── camera/
+│   │   ├── camera_service.py
+│   │   ├── picamera2_backend.py
+│   │   ├── storage.py
+│   │   └── stream_server.py
+│   └── vision/
+│       ├── detector.py
+│       ├── target_selector.py
+│       ├── tracking_state.py
+│       └── vision_service.py
 │
 └── lib/
     └── libopencm3/
@@ -1096,8 +1101,9 @@ Do not optimize communication protocols before measurements show a real need.
 # Raspberry Pi Camera Service
 
 `host.camera` owns one Raspberry Pi CSI camera and makes its frames available to
-the local browser stream, MP4 recording, dataset capture, and future inference
-code. No browser client or dataset worker opens another camera object.
+the local browser stream, MP4 recording, dataset capture, and the optional
+`host.vision` worker. No browser client, dataset worker, or vision component
+opens another camera object.
 
 The supported deployment target is Raspberry Pi OS with Picamera2/libcamera.
 Install the required system packages:
@@ -1112,6 +1118,14 @@ is required, create it with access to system packages:
 
 ```bash
 python3 -m venv --system-site-packages .venv
+source .venv/bin/activate
+```
+
+Camera-only operation does not require Ultralytics. To enable optional YOLO
+detection in that system-packages environment, install it separately:
+
+```bash
+python -m pip install ultralytics
 ```
 
 Connect the CSI camera while the Pi is powered off. After boot, verify that the
@@ -1141,6 +1155,25 @@ python3 -m host.camera.stream_server \
     --min-free-gb 1
 ```
 
+Detection is disabled at startup, including when a model is configured. Copy a
+trained `.pt` model to the Pi and supply its path when starting the camera:
+
+```bash
+python3 -m host.camera.stream_server \
+    --model /home/pi/models/animal_mouse.pt \
+    --target-class animal_mouse \
+    --confidence 0.5 \
+    --detection-fps 5 \
+    --inference-size 640 \
+    --dead-zone-x 0.05 \
+    --dead-zone-y 0.05
+```
+
+The model is loaded synchronously the first time **Enable Vision** is selected,
+then retained across disable/enable cycles. A missing model, absent target
+class, or inference failure disables only vision; streaming, recording, and
+captures continue to operate.
+
 Find the Pi's local address with:
 
 ```bash
@@ -1158,6 +1191,12 @@ dataset-capture state. Its controls start and stop recording, save one frame,
 and start or stop interval dataset capture. Dataset capture is disabled at
 startup and takes one image immediately when enabled, then approximately one
 per configured interval without queuing missed captures.
+
+When vision is enabled, a transparent browser canvas draws the latest boxes,
+selected target, centers, dead zone, state, and normalized errors over the raw
+MJPEG image. `/stream`, saved images, and MP4 files remain unannotated. The
+overlay polls status about four times per second and can therefore trail the
+live image by an inference interval.
 
 Recordings use timestamped MP4 filenames under `data/recordings/`. Starting or
 stopping recording does not restart the camera, repeated start/stop requests
@@ -1196,28 +1235,51 @@ POST /api/record/stop
 POST /api/capture
 POST /api/dataset/start
 POST /api/dataset/stop
+POST /api/vision/start
+POST /api/vision/stop
 ```
+
+Vision status is included in `GET /api/status` and every mutation response.
+`SEARCHING` has no target, `DETECTED` is the first result after acquisition,
+and later target frames are `TRACKING` or `LOCKED`. Pan error is negative to
+the left and positive to the right; tilt error is negative above center and
+positive below. Dead-zone comparisons are inclusive and do not zero the raw
+normalized errors.
+
+The worker processes only the latest requested camera frame and never queues
+inference work. `--detection-fps` is a maximum rather than a guarantee. The
+reported inference time and completed detection rate help determine whether a
+smaller input or later model export is warranted. The
+[Ultralytics prediction documentation](https://docs.ultralytics.com/modes/predict)
+describes the model arguments and result boxes used here. `.pt` is the initial
+supported path; the
+[Raspberry Pi guide](https://docs.ultralytics.com/guides/raspberry-pi) identifies
+NCNN as a faster ARM deployment option for later optimization.
 
 Generic camera logic can be tested without Raspberry Pi hardware:
 
 ```bash
 make camera-test
+make vision-test
 ```
 
 ---
 
 # Current Scope Boundary
 
-This repository contains the embedded motion-control subsystem and the isolated
-Raspberry Pi camera acquisition service documented above.
+This repository contains the embedded motion-control subsystem, the isolated
+Raspberry Pi camera acquisition service, and the optional `host/vision/` layer
+documented above.
 
-Related systems such as YOLO inference, object detection, tracking, annotated
-streaming, autonomous target selection, and the full Sentry application UI
-remain out of scope.
+The vision exception is limited to optional YOLO detection, exact-class
+highest-confidence selection, camera-coordinate error/state reporting, and a
+browser overlay. ByteTrack, identity persistence, annotated stored media,
+vision-driven motor commands, autonomous behavior, and the full Sentry
+application UI remain out of scope.
 
 The firmware exposes a clean motion-control interface without depending on the
-camera service. The camera service does not send motor commands or change the
-MCU protocol.
+camera or vision services. Neither host subsystem sends motor commands or
+changes the MCU protocol.
 
 ---
 

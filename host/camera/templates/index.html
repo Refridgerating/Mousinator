@@ -7,10 +7,12 @@
     <style>
       body { font-family: system-ui, sans-serif; max-width: 1100px; margin: 1rem auto; padding: 0 1rem; background: #111; color: #eee; }
       h1 { margin-bottom: 0.5rem; }
-      img { display: block; width: 100%; height: auto; background: #222; border: 1px solid #555; }
+      .viewer { position: relative; width: 100%; line-height: 0; }
+      .viewer img { display: block; width: 100%; height: auto; box-sizing: border-box; background: #222; border: 1px solid #555; }
+      .viewer canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
       .status { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 0.5rem; margin: 1rem 0; }
       .status div { background: #222; padding: 0.7rem; border-radius: 0.3rem; }
-      .controls { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+      .controls { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.5rem; }
       button { padding: 0.7rem 1rem; border: 0; border-radius: 0.3rem; cursor: pointer; }
       button:hover { filter: brightness(1.15); }
       #message { min-height: 1.5rem; color: #f6c85f; }
@@ -18,14 +20,23 @@
   </head>
   <body>
     <h1>Sentry Camera</h1>
-    <img src="/stream" alt="Live Sentry camera stream">
+    <div class="viewer">
+      <img id="stream" src="/stream" alt="Live Sentry camera stream">
+      <canvas id="overlay" aria-hidden="true"></canvas>
+    </div>
     <section class="status">
       <div>Camera: <span id="camera">unknown</span></div>
       <div>Resolution: <span id="resolution">unknown</span></div>
-      <div>FPS: <span id="fps">unknown</span></div>
+      <div>Camera FPS: <span id="fps">unknown</span></div>
       <div>Recording: <span id="recording">unknown</span></div>
       <div>Dataset capture: <span id="dataset">unknown</span></div>
       <div>Capture interval: <span id="interval">unknown</span></div>
+      <div>Vision: <span id="vision">unknown</span></div>
+      <div>Tracking state: <span id="tracking-state">SEARCHING</span></div>
+      <div>Target: <span id="target">none</span></div>
+      <div>Errors (pan, tilt): <span id="errors">none</span></div>
+      <div>Inference: <span id="inference">none</span></div>
+      <div>Detection FPS: <span id="detection-fps">0</span></div>
     </section>
     <div class="controls">
       <button data-endpoint="/api/record/start">Start Recording</button>
@@ -34,9 +45,19 @@
       <button data-endpoint="/api/dataset/start">Start Dataset Capture</button>
       <button data-endpoint="/api/dataset/stop">Stop Dataset Capture</button>
     </div>
+    <div class="controls">
+      <button data-endpoint="/api/vision/start">Enable Vision</button>
+      <button data-endpoint="/api/vision/stop">Disable Vision</button>
+    </div>
     <p id="message"></p>
     <script>
       const message = document.getElementById("message");
+      const canvas = document.getElementById("overlay");
+      const context = canvas.getContext("2d");
+
+      function numberOrNone(value, digits = 3) {
+        return value === null || value === undefined ? "none" : Number(value).toFixed(digits);
+      }
 
       function render(status) {
         document.getElementById("camera").textContent = status.camera_running ? "running" : "stopped";
@@ -45,7 +66,83 @@
         document.getElementById("recording").textContent = status.recording ? status.recording_filename : "stopped";
         document.getElementById("dataset").textContent = status.dataset_capture_enabled ? "enabled" : "disabled";
         document.getElementById("interval").textContent = `${status.capture_interval} s`;
-        if (status.last_error) message.textContent = status.last_error;
+        document.getElementById("vision").textContent = status.vision_enabled ? "enabled" : (status.vision_ready ? "ready" : "disabled");
+        document.getElementById("tracking-state").textContent = status.tracking_state;
+        document.getElementById("target").textContent = status.target_detected ? `${status.target_class} ${numberOrNone(status.target_confidence)}` : "none";
+        document.getElementById("errors").textContent = `${numberOrNone(status.pan_error)}, ${numberOrNone(status.tilt_error)}`;
+        document.getElementById("inference").textContent = status.inference_ms === null ? "none" : `${Number(status.inference_ms).toFixed(1)} ms`;
+        document.getElementById("detection-fps").textContent = Number(status.detection_fps).toFixed(2);
+        message.textContent = status.vision_error || status.last_error || "";
+        drawOverlay(status);
+      }
+
+      function isSelected(detection, status) {
+        if (!detection.bbox || !status.target_bbox) return false;
+        const sameCoordinates = ["x1", "y1", "x2", "y2"].every(
+          (key) => Math.abs(detection.bbox[key] - status.target_bbox[key]) < 0.01
+        );
+        return sameCoordinates
+          && detection.class_name === status.target_class
+          && Math.abs(detection.confidence - status.target_confidence) < 0.000001;
+      }
+
+      function drawOverlay(status) {
+        const displayWidth = canvas.clientWidth;
+        const displayHeight = canvas.clientHeight;
+        if (canvas.width !== displayWidth || canvas.height !== displayHeight) {
+          canvas.width = displayWidth;
+          canvas.height = displayHeight;
+        }
+        context.clearRect(0, 0, canvas.width, canvas.height);
+        const sourceWidth = status.vision_frame_width;
+        const sourceHeight = status.vision_frame_height;
+        if (!sourceWidth || !sourceHeight) return;
+
+        const scaleX = canvas.width / sourceWidth;
+        const scaleY = canvas.height / sourceHeight;
+        const centerX = canvas.width / 2;
+        const centerY = canvas.height / 2;
+
+        context.save();
+        context.strokeStyle = "rgba(80, 190, 255, 0.9)";
+        context.lineWidth = 1.5;
+        const deadWidth = status.dead_zone_x * canvas.width;
+        const deadHeight = status.dead_zone_y * canvas.height;
+        context.strokeRect(centerX - deadWidth / 2, centerY - deadHeight / 2, deadWidth, deadHeight);
+        context.beginPath();
+        context.moveTo(centerX - 9, centerY); context.lineTo(centerX + 9, centerY);
+        context.moveTo(centerX, centerY - 9); context.lineTo(centerX, centerY + 9);
+        context.stroke();
+
+        for (const detection of status.detections || []) {
+          const box = detection.bbox;
+          const selected = isSelected(detection, status);
+          const x = box.x1 * scaleX;
+          const y = box.y1 * scaleY;
+          const width = (box.x2 - box.x1) * scaleX;
+          const height = (box.y2 - box.y1) * scaleY;
+          context.strokeStyle = selected ? "#ff5252" : "#61e786";
+          context.fillStyle = context.strokeStyle;
+          context.lineWidth = selected ? 4 : 2;
+          context.strokeRect(x, y, width, height);
+          context.font = "14px system-ui";
+          context.fillText(`${detection.class_name} ${Number(detection.confidence).toFixed(2)}`, x + 3, Math.max(14, y - 4));
+        }
+
+        if (status.target_center) {
+          const targetX = status.target_center.x * scaleX;
+          const targetY = status.target_center.y * scaleY;
+          context.strokeStyle = status.locked ? "#ffd166" : "#ff5252";
+          context.lineWidth = 2;
+          context.beginPath();
+          context.moveTo(centerX, centerY);
+          context.lineTo(targetX, targetY);
+          context.stroke();
+          context.beginPath();
+          context.arc(targetX, targetY, 6, 0, Math.PI * 2);
+          context.stroke();
+        }
+        context.restore();
       }
 
       async function refresh() {
@@ -74,7 +171,7 @@
       });
 
       refresh();
-      setInterval(refresh, 1000);
+      setInterval(refresh, 250);
     </script>
   </body>
 </html>

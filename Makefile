@@ -29,7 +29,7 @@ LDFLAGS := $(ARCH_FLAGS) -nostartfiles -static \
 	-Wl,--gc-sections -Wl,--fatal-warnings
 LDLIBS := -Wl,--start-group -lopencm3_stm32f1 -lc -lgcc -lnosys -Wl,--end-group
 
-.PHONY: all clean deps check-tools verify-libopencm3 test camera-test
+.PHONY: all clean deps check-tools verify-libopencm3 test camera-test vision-test
 
 all: check-tools $(BUILD_DIR)/$(PROJECT).bin firmware.bin
 
@@ -92,11 +92,18 @@ test: tests/protocol_test tests/motion_test tests/board_mapping_test \
 	$(PYTHON) tests/host_test.py
 	$(PYTHON) tests/camera_storage_test.py
 	$(PYTHON) tests/camera_service_test.py
+	$(PYTHON) tests/vision_logic_test.py
+	$(PYTHON) tests/vision_service_test.py
 	$(PYTHON) tests/camera_http_test.py
 
 camera-test:
 	$(PYTHON) tests/camera_storage_test.py
 	$(PYTHON) tests/camera_service_test.py
+	$(PYTHON) tests/camera_http_test.py
+
+vision-test:
+	$(PYTHON) tests/vision_logic_test.py
+	$(PYTHON) tests/vision_service_test.py
 	$(PYTHON) tests/camera_http_test.py
 
 tests/protocol_test: tests/protocol_test.c src/protocol.c src/tmc2209.c \

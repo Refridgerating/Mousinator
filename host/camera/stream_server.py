@@ -15,6 +15,11 @@ from werkzeug.serving import BaseWSGIServer, make_server
 from .camera_service import CameraService, CameraUnavailableError
 from .picamera2_backend import Picamera2Backend
 from .storage import GIB, MediaStorage, StorageLowError
+from host.vision import (
+    VisionConfigurationError,
+    VisionInitializationError,
+    VisionService,
+)
 
 
 LOGGER = logging.getLogger("sentry.camera")
@@ -22,11 +27,14 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_DIR = REPOSITORY_ROOT / "data"
 
 
-def create_app(service: CameraService) -> Flask:
+def create_app(service: CameraService, vision_service: VisionService) -> Flask:
     app = Flask(__name__)
 
+    def combined_status() -> dict[str, Any]:
+        return {**service.status(), **vision_service.status()}
+
     def success(**values: Any) -> tuple[Response, int]:
-        payload = {"ok": True, "status": service.status(), **values}
+        payload = {"ok": True, "status": combined_status(), **values}
         return jsonify(payload), 200
 
     def run_action(action: Callable[[], Any], response_key: str | None = None):
@@ -35,14 +43,18 @@ def create_app(service: CameraService) -> Flask:
             values = {} if response_key is None else {response_key: result}
             return success(**values)
         except CameraUnavailableError as exc:
-            return _error_response(service, str(exc), 503)
+            return _error_response(combined_status, str(exc), 503)
         except StorageLowError as exc:
-            return _error_response(service, str(exc), 507)
+            return _error_response(combined_status, str(exc), 507)
+        except VisionConfigurationError as exc:
+            return _error_response(combined_status, str(exc), 400)
+        except VisionInitializationError as exc:
+            return _error_response(combined_status, str(exc), 503)
         except (ValueError, TypeError) as exc:
-            return _error_response(service, str(exc), 400)
+            return _error_response(combined_status, str(exc), 400)
         except Exception as exc:  # keep API failures machine-readable
             LOGGER.exception("camera API action failed")
-            return _error_response(service, str(exc), 500)
+            return _error_response(combined_status, str(exc), 500)
 
     @app.get("/")
     def index():
@@ -51,7 +63,7 @@ def create_app(service: CameraService) -> Flask:
     @app.get("/stream")
     def stream():
         if not service.status()["camera_running"]:
-            return _error_response(service, "camera is not running", 503)
+            return _error_response(combined_status, "camera is not running", 503)
         return Response(
             _mjpeg_frames(service),
             mimetype="multipart/x-mixed-replace; boundary=FRAME",
@@ -64,7 +76,7 @@ def create_app(service: CameraService) -> Flask:
 
     @app.get("/api/status")
     def status():
-        return jsonify(service.status())
+        return jsonify(combined_status())
 
     @app.post("/api/record/start")
     def record_start():
@@ -97,14 +109,24 @@ def create_app(service: CameraService) -> Flask:
     def dataset_stop():
         return run_action(service.stop_dataset_capture, "changed")
 
+    @app.post("/api/vision/start")
+    def vision_start():
+        return run_action(vision_service.enable, "changed")
+
+    @app.post("/api/vision/stop")
+    def vision_stop():
+        return run_action(vision_service.disable, "changed")
+
     return app
 
 
 def _error_response(
-    service: CameraService, message: str, status_code: int
+    status_provider: Callable[[], dict[str, Any]],
+    message: str,
+    status_code: int,
 ) -> tuple[Response, int]:
     return (
-        jsonify({"ok": False, "error": message, "status": service.status()}),
+        jsonify({"ok": False, "error": message, "status": status_provider()}),
         status_code,
     )
 
@@ -142,6 +164,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--min-free-gb", type=_nonnegative_float, default=1.0)
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
+    parser.add_argument("--model", type=Path)
+    parser.add_argument("--target-class", default="animal_mouse")
+    parser.add_argument("--confidence", type=_fraction, default=0.5)
+    parser.add_argument("--detection-fps", type=_positive_float, default=5.0)
+    parser.add_argument("--inference-size", type=_positive_int, default=640)
+    parser.add_argument("--dead-zone-x", type=_fraction, default=0.05)
+    parser.add_argument("--dead-zone-y", type=_fraction, default=0.05)
     parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
@@ -176,6 +205,17 @@ def main(argv: list[str] | None = None) -> int:
         capture_interval_s=args.capture_interval,
         logger=LOGGER,
     )
+    vision_service = VisionService(
+        service,
+        model_path=args.model,
+        target_class=args.target_class,
+        confidence=args.confidence,
+        detection_fps=args.detection_fps,
+        inference_size=args.inference_size,
+        dead_zone_x=args.dead_zone_x,
+        dead_zone_y=args.dead_zone_y,
+        logger=LOGGER,
+    )
 
     server: BaseWSGIServer | None = None
     server_thread: threading.Thread | None = None
@@ -193,7 +233,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         service.start()
-        app = create_app(service)
+        vision_service.start()
+        app = create_app(service, vision_service)
         server = make_server(args.host, args.port, app, threaded=True)
 
         def serve() -> None:
@@ -221,6 +262,11 @@ def main(argv: list[str] | None = None) -> int:
         if server_thread is not None and server_thread is not threading.current_thread():
             server_thread.join()
         try:
+            vision_service.close()
+        except Exception as exc:
+            LOGGER.exception("vision service shutdown failed")
+            shutdown_error = shutdown_error or exc
+        try:
             service.close()
         except Exception as exc:
             LOGGER.exception("camera service shutdown failed")
@@ -238,6 +284,13 @@ def _positive_even_int(value: str) -> int:
     return parsed
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be positive")
+    return parsed
+
+
 def _positive_float(value: str) -> float:
     parsed = float(value)
     if parsed <= 0:
@@ -249,6 +302,13 @@ def _nonnegative_float(value: str) -> float:
     parsed = float(value)
     if parsed < 0:
         raise argparse.ArgumentTypeError("must not be negative")
+    return parsed
+
+
+def _fraction(value: str) -> float:
+    parsed = float(value)
+    if not 0.0 <= parsed <= 1.0:
+        raise argparse.ArgumentTypeError("must be in the range 0..1")
     return parsed
 
 

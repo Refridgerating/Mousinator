@@ -3,7 +3,8 @@
 ## Purpose
 
 This repository contains the custom embedded firmware for the Sentry
-motion-control subsystem and a narrowly scoped Raspberry Pi camera service.
+motion-control subsystem, a narrowly scoped Raspberry Pi camera service, and
+an optional host-only YOLO vision layer.
 
 The immediate target hardware is:
 
@@ -25,15 +26,16 @@ The Raspberry Pi performs perception, object detection, tracking, target selecti
 The STM32 performs real-time motor control, step generation, local safety handling, motor-driver configuration, and hardware state reporting.
 
 Do not expand this repository into the rest of the Sentry system beyond the
-explicit camera acquisition, local streaming, recording, and dataset-capture
-service under `host/camera/`.
+explicit camera service under `host/camera/` and optional detection, target
+selection, and vision-only tracking state under `host/vision/`.
 
 ---
 
 # Current Scope
 
 Develop only the SKR Mini E3 V2.0 firmware, minimum host-side utilities required
-to test it, and the isolated Raspberry Pi camera service described below.
+to test it, the isolated Raspberry Pi camera service, and its optional host
+vision layer described below.
 
 Primary responsibilities:
 
@@ -55,12 +57,15 @@ Primary responsibilities:
 16. Raspberry Pi CSI camera acquisition
 17. Local MJPEG camera viewing and controls
 18. Camera recording and raw dataset frame collection
+19. Optional YOLO object detection from CameraService RGB frames
+20. Highest-confidence target selection for one configured class
+21. Vision-only tracking state and browser overlays
 
 Do not implement:
 
-- YOLO
-- object detection
-- object tracking
+- ByteTrack or other identity-persistence tracking
+- vision-generated MCU or serial commands
+- annotated recordings or dataset images
 - web interfaces unrelated to the local camera service
 - Moonraker
 - Klipper host software
@@ -70,12 +75,13 @@ Do not implement:
 - heaters
 - extrusion
 - bed control
-- autonomous target-selection logic
+- autonomous target persistence or motion-control logic
 - Sentry application UI
 
-The camera exception is limited to `host/camera/` and its tests and
-documentation. It must use a single camera owner, must not send MCU motion
-commands, and must remain usable without YOLO or tracking code.
+The host exception is limited to `host/camera/`, `host/vision/`, their tests,
+and documentation. `host/camera/` remains the single camera owner. Vision must
+be optional, disabled at startup, and unable to send MCU motion commands. The
+camera service must remain usable without Ultralytics or an available model.
 
 ---
 
@@ -1079,7 +1085,7 @@ Do not remove communication-loss handling once implemented.
 Do not replace the BTT bootloader.
 
 Do not modify unrelated Sentry repositories or host application code outside
-the explicitly authorized `host/camera/` subsystem.
+the explicitly authorized `host/camera/` and `host/vision/` subsystems.
 
 Do not add printer functionality merely because upstream examples contain it.
 
@@ -1114,7 +1120,7 @@ Do not simultaneously develop:
 - telemetry
 - TMC tuning
 - binary protocol
-- tracking integration
+- vision-driven motion integration
 
 before basic board bring-up and USB communication are verified.
 
@@ -1147,6 +1153,7 @@ awaits M3-A/M3-B physical validation and correction. Do not begin TILT motion,
 homing, M4, or later milestones until M3 has been physically tested and
 further work is explicitly requested.
 
-The Raspberry Pi camera service is an independent authorized workstream. Camera
-changes must not modify the MCU firmware, motor-control protocol, or firmware
-milestone state.
+The Raspberry Pi camera and optional vision services are an independent
+authorized workstream. Host vision may report detections and normalized target
+errors but must not modify the MCU firmware, send motor commands, change the
+motor-control protocol, or alter firmware milestone state.
